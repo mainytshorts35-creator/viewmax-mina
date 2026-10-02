@@ -1,9 +1,31 @@
+import streamlit as st
+import streamlit.components.v1 as components
+
+st.set_page_config(
+    page_title="ViewMAX File Manager",
+    page_icon="🖥️",
+    layout="wide"
+)
+
+# Remove default Streamlit padding for full-screen view
+st.markdown("""
+    <style>
+        #MainMenu {visibility: hidden;}
+        footer {visibility: hidden;}
+        header {visibility: hidden;}
+        .block-container {
+            padding: 0rem;
+            max-width: 100%;
+        }
+    </style>
+""", unsafe_allow_html=True)
+
+# Render ViewMAX Interface inside Streamlit Component
+viewmax_html = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ViewMAX File Manager</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; font-family: "Courier New", Courier, monospace, sans-serif; user-select: none; }
         body { background-color: #008080; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
@@ -17,7 +39,7 @@
         .workspace { flex: 1; padding: 20px; display: flex; justify-content: center; align-items: center; }
 
         /* Window Frame */
-        .window { background: #c0c0c0; border: 2px solid #fff; border-right-color: #404040; border-bottom-color: #404040; width: 780px; height: 480px; display: flex; flex-direction: column; box-shadow: 4px 4px 0px #000; }
+        .window { background: #c0c0c0; border: 2px solid #fff; border-right-color: #404040; border-bottom-color: #404040; width: 100%; max-width: 780px; height: 480px; display: flex; flex-direction: column; box-shadow: 4px 4px 0px #000; }
         .title-bar { background: #000080; color: #fff; padding: 4px 8px; font-weight: bold; display: flex; justify-content: space-between; align-items: center; }
         .title-bar-buttons { display: flex; gap: 4px; }
         .btn-win { width: 16px; height: 14px; background: #c0c0c0; border: 1px solid #fff; border-right-color: #000; border-bottom-color: #000; font-size: 10px; line-height: 12px; text-align: center; cursor: pointer; color: #000; font-weight: bold; }
@@ -47,16 +69,13 @@
     </style>
 </head>
 <body>
-
-    <!-- Menu Bar -->
     <div class="menu-bar">
-        <div class="menu-item" onclick="alert('ViewMAX v1.0 - Web Edition')">Desk</div>
+        <div class="menu-item" onclick="alert('ViewMAX v1.0 - Streamlit Cloud')">Desk</div>
         <div class="menu-item" onclick="createNewFile()">New File</div>
         <div class="menu-item" onclick="goBack()">Up Directory</div>
         <div class="menu-item" onclick="location.reload()">Refresh</div>
     </div>
 
-    <!-- Main Desktop Workspace -->
     <div class="workspace">
         <div class="window">
             <div class="title-bar">
@@ -74,9 +93,7 @@
                 <div class="path-bar" id="current-path">C:\SYSTEM</div>
             </div>
 
-            <div class="window-body" id="file-grid">
-                <!-- Rendered dynamically -->
-            </div>
+            <div class="window-body" id="file-grid"></div>
 
             <div class="status-bar">
                 <span id="status-text">6 Item(s)</span>
@@ -85,7 +102,6 @@
         </div>
     </div>
 
-    <!-- Text File Viewer Modal -->
     <div class="modal" id="viewer-modal">
         <div class="title-bar">
             <span id="modal-title">FILE.TXT</span>
@@ -95,7 +111,6 @@
     </div>
 
     <script>
-        // Simulated DOS File System Data
         const fileSystem = {
             'C': {
                 'SYSTEM': [
@@ -103,20 +118,17 @@
                     { name: 'DOS', type: 'folder' },
                     { name: 'GAMES', type: 'folder' },
                     { name: 'VIEWMAX.EXE', type: 'app', content: 'Binary executable file.' },
-                    { name: 'AUTOEXEC.BAT', type: 'file', content: '@ECHO OFF\nPROMPT $P$G\nPATH C:\\DOS;C:\\SYSTEM\nSET TEMP=C:\\TEMP' },
-                    { name: 'CONFIG.SYS', type: 'file', content: 'FILES=40\nBUFFERS=20\nDEVICE=C:\\DOS\\HIMEM.SYS' },
-                    { name: 'README.TXT', type: 'file', content: 'Welcome to ViewMAX Web Edition!\nDouble-click text files to view contents.\nUse "New File" to add files.' }
+                    { name: 'AUTOEXEC.BAT', type: 'file', content: '@ECHO OFF\\nPROMPT $P$G\\nPATH C:\\\\DOS;C:\\\\SYSTEM\\nSET TEMP=C:\\\\TEMP' },
+                    { name: 'CONFIG.SYS', type: 'file', content: 'FILES=40\\nBUFFERS=20\\nDEVICE=C:\\\\DOS\\\\HIMEM.SYS' },
+                    { name: 'README.TXT', type: 'file', content: 'Welcome to ViewMAX Streamlit Edition!' }
                 ],
                 'DOS': [
                     { name: '..', type: 'folder' },
-                    { name: 'COMMAND.COM', type: 'app', content: 'DOS Command Processor.' },
-                    { name: 'FORMAT.COM', type: 'app', content: 'Disk Format Utility.' },
-                    { name: 'EDIT.COM', type: 'app', content: 'Text Editor Utility.' }
+                    { name: 'COMMAND.COM', type: 'app', content: 'DOS Command Processor.' }
                 ],
                 'GAMES': [
                     { name: '..', type: 'folder' },
-                    { name: 'DOOM.EXE', type: 'app', content: 'Starting DOOM...' },
-                    { name: 'PRINCE.EXE', type: 'app', content: 'Starting Prince of Persia...' }
+                    { name: 'DOOM.EXE', type: 'app', content: 'Starting DOOM...' }
                 ]
             },
             'A': {
@@ -212,8 +224,10 @@
             }
         }
 
-        // Initialize display
         renderFiles();
     </script>
 </body>
 </html>
+"""
+
+components.html(viewmax_html, height=620)
