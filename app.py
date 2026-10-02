@@ -3,6 +3,7 @@ import os
 import tempfile
 import numpy as np
 import yt_dlp
+import imageio_ffmpeg
 from PIL import Image, ImageDraw, ImageFont
 from gtts import gTTS
 
@@ -28,11 +29,14 @@ def apply_frame_transform(clip, transform_fn):
     else:
         return clip.transform(lambda gf, t: transform_fn(gf(t), t))
 
-# Download Helper for Shorts / Video URLs
+# Download Helper for Shorts / Video URLs with explicit FFmpeg path
 def download_clip_from_url(url, output_dir):
     """Downloads a video clip from YouTube Shorts, TikTok, or direct video URLs."""
+    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    
     ydl_opts = {
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'format': 'best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best',
+        'ffmpeg_location': ffmpeg_exe,
         'outtmpl': os.path.join(output_dir, 'downloaded_clip.%(ext)s'),
         'quiet': True,
         'no_warnings': True,
@@ -42,35 +46,6 @@ def download_clip_from_url(url, output_dir):
         info = ydl.extract_info(url, download=True)
         filename = ydl.prepare_filename(info)
         return filename
-
-# Streamlit Page Setup
-st.set_page_config(
-    page_title="ViewMax - Viral Clip Repurposer",
-    page_icon="✂️",
-    layout="wide"
-)
-
-# Dark SaaS Custom Styling
-st.markdown("""
-    <style>
-        .stApp { background-color: #0d1117; color: #ffffff; font-family: 'Inter', sans-serif; }
-        .main-header {
-            font-size: 2.3rem; font-weight: 900;
-            background: linear-gradient(90deg, #FF416C, #8A2BE2, #00F2FE);
-            -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-            margin-bottom: 0.2rem;
-        }
-        .stButton>button {
-            background: linear-gradient(90deg, #FF416C, #8A2BE2);
-            color: white; font-weight: bold; border: none;
-            border-radius: 8px; padding: 0.8rem 1.5rem; width: 100%;
-        }
-    </style>
-""", unsafe_allow_html=True)
-
-# App Header
-st.markdown('<div class="main-header">✂️ ViewMax Viral Clip Repurposer</div>', unsafe_allow_html=True)
-st.caption("Paste a YouTube Shorts URL or Upload a Clip $\\rightarrow$ Strip original audio $\\rightarrow$ Add AI Voiceover & Burned Captions.")
 
 # --- Frame Caption Overlay Generator ---
 def render_animated_caption(frame_np, current_time, text, total_duration, style_preset):
@@ -121,6 +96,35 @@ def render_animated_caption(frame_np, current_time, text, total_duration, style_
     draw.text((x, y), active_phrase, font=font, fill=text_color)
 
     return np.array(img)
+
+# Streamlit Page Setup
+st.set_page_config(
+    page_title="ViewMax - Viral Clip Repurposer",
+    page_icon="✂️️",
+    layout="wide"
+)
+
+# Dark SaaS Custom Styling
+st.markdown("""
+    <style>
+        .stApp { background-color: #0d1117; color: #ffffff; font-family: 'Inter', sans-serif; }
+        .main-header {
+            font-size: 2.3rem; font-weight: 900;
+            background: linear-gradient(90deg, #FF416C, #8A2BE2, #00F2FE);
+            -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+            margin-bottom: 0.2rem;
+        }
+        .stButton>button {
+            background: linear-gradient(90deg, #FF416C, #8A2BE2);
+            color: white; font-weight: bold; border: none;
+            border-radius: 8px; padding: 0.8rem 1.5rem; width: 100%;
+        }
+    </style>
+""", unsafe_allow_html=True)
+
+# App Header
+st.markdown('<div class="main-header">✂️ ViewMax Viral Clip Repurposer</div>', unsafe_allow_html=True)
+st.caption("Paste a YouTube Shorts URL or Upload a Clip $\\rightarrow$ Strip original audio $\\rightarrow$ Add AI Voiceover & Burned Captions.")
 
 # --- Sidebar Options ---
 st.sidebar.title("🎛️ Repurposer Settings")
