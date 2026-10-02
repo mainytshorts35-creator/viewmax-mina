@@ -2,6 +2,7 @@ import streamlit as st
 import os
 import tempfile
 import numpy as np
+import yt_dlp
 from PIL import Image, ImageDraw, ImageFont
 from gtts import gTTS
 
@@ -26,6 +27,21 @@ def apply_frame_transform(clip, transform_fn):
         return clip.fl(lambda gf, t: transform_fn(gf(t), t))
     else:
         return clip.transform(lambda gf, t: transform_fn(gf(t), t))
+
+# Download Helper for Shorts / Video URLs
+def download_clip_from_url(url, output_dir):
+    """Downloads a video clip from YouTube Shorts, TikTok, or direct video URLs."""
+    ydl_opts = {
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'outtmpl': os.path.join(output_dir, 'downloaded_clip.%(ext)s'),
+        'quiet': True,
+        'no_warnings': True,
+        'overwrites': True
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        filename = ydl.prepare_filename(info)
+        return filename
 
 # Streamlit Page Setup
 st.set_page_config(
@@ -54,7 +70,7 @@ st.markdown("""
 
 # App Header
 st.markdown('<div class="main-header">✂️ ViewMax Viral Clip Repurposer</div>', unsafe_allow_html=True)
-st.caption("Upload any video clip $\\rightarrow$ Strip original audio into raw footage $\\rightarrow$ Add new AI voiceover & animated captions.")
+st.caption("Paste a YouTube Shorts URL or Upload a Clip $\\rightarrow$ Strip original audio $\\rightarrow$ Add AI Voiceover & Burned Captions.")
 
 # --- Frame Caption Overlay Generator ---
 def render_animated_caption(frame_np, current_time, text, total_duration, style_preset):
@@ -71,7 +87,6 @@ def render_animated_caption(frame_np, current_time, text, total_duration, style_
     chunk_size = 4
     chunks = [" ".join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
     
-    # Determine active chunk based on current time
     time_per_chunk = total_duration / max(len(chunks), 1)
     active_index = min(int(current_time // time_per_chunk), len(chunks) - 1)
     active_phrase = chunks[active_index] if active_index >= 0 else chunks[0]
@@ -83,7 +98,6 @@ def render_animated_caption(frame_np, current_time, text, total_duration, style_
     except Exception:
         font = ImageFont.load_default()
 
-    # Calculate bounding box for center positioning
     try:
         bbox = draw.textbbox((0, 0), active_phrase, font=font)
         text_w = bbox[2] - bbox[0]
@@ -95,15 +109,13 @@ def render_animated_caption(frame_np, current_time, text, total_duration, style_
     x = (w - text_w) // 2
     y = int(h * 0.72)
 
-    # Style Configurations
-    bg_color = (0, 0, 0, 200)
     text_color = (255, 220, 0) if "Hormozi" in style_preset else (0, 242, 254) if "Neon" in style_preset else (255, 255, 255)
 
     # Draw Background Box for Contrast
     pad_x, pad_y = 16, 10
     draw.rectangle([x - pad_x, y - pad_y, x + text_w + pad_x, y + text_h + pad_y], fill=(0, 0, 0))
 
-    # Text Outline & Highlight
+    # Text Outlines
     for dx, dy in [(-2, -2), (-2, 2), (2, -2), (2, 2), (0, 3)]:
         draw.text((x + dx, y + dy), active_phrase, font=font, fill=(0, 0, 0))
     draw.text((x, y), active_phrase, font=font, fill=text_color)
@@ -114,16 +126,23 @@ def render_animated_caption(frame_np, current_time, text, total_duration, style_
 st.sidebar.title("🎛️ Repurposer Settings")
 voice_accent = st.sidebar.selectbox("AI Voice Accent", ["US English", "UK English", "Australian English", "Indian English"])
 caption_style = st.sidebar.selectbox("Caption Style Preset", ["Alex Hormozi Yellow Box", "Neon Cyberpunk", "Classic Clean White"])
-speed_factor = st.sidebar.slider("Voiceover Speed Multiplier", 0.8, 1.3, 1.0, 0.1)
 
 # --- Main Studio Layout ---
-col1, col2 = col_layout = st.columns([1, 1])
+col1, col2 = st.columns([1, 1])
 
 with col1:
-    st.subheader("1. Upload Viral Video Clip")
-    uploaded_video = st.file_uploader("Upload MP4, MOV, or AVI video file", type=["mp4", "mov", "avi"])
+    st.subheader("1. Source Video Clip")
+    source_method = st.radio("Choose Input Method:", ["YouTube / Shorts URL", "Upload Local Video File"], horizontal=True)
 
-    st.subheader("2. New Script & AI Voiceover")
+    shorts_url = ""
+    uploaded_video = None
+
+    if source_method == "YouTube / Shorts URL":
+        shorts_url = st.text_input("Paste YouTube Shorts or Video URL:", placeholder="https://www.youtube.com/shorts/...")
+    else:
+        uploaded_video = st.file_uploader("Upload MP4, MOV, or AVI video file", type=["mp4", "mov", "avi"])
+
+    st.subheader("2. New AI Script & Voiceover")
     script_text = st.text_area(
         "Enter new voiceover script:",
         value="This simple psychological trick will instantly double your productivity. Stop multitasking right now!",
@@ -131,19 +150,23 @@ with col1:
     )
 
 with col2:
-    st.subheader("3. Video Preview & Processing")
-    if uploaded_video:
+    st.subheader("3. Video Status & Output Preview")
+    if shorts_url:
+        st.info(f"🔗 Target URL set: `{shorts_url}`")
+    elif uploaded_video:
         st.video(uploaded_video)
-        st.success("Viral clip uploaded successfully!")
+        st.success("Local viral clip uploaded successfully!")
     else:
-        st.info("Upload a video clip on the left to begin repurposing.")
+        st.info("Provide a Shorts URL or upload a file on the left to get started.")
 
 st.divider()
 
 # --- Execution Engine ---
 if st.button("🚀 Process & Repurpose Viral Clip"):
-    if not uploaded_video:
-        st.error("Please upload a video file first!")
+    if source_method == "YouTube / Shorts URL" and not shorts_url.strip():
+        st.error("Please paste a valid YouTube Shorts URL!")
+    elif source_method == "Upload Local Video File" and not uploaded_video:
+        st.error("Please upload a video file!")
     elif not script_text.strip():
         st.error("Please enter a voiceover script!")
     else:
@@ -151,56 +174,57 @@ if st.button("🚀 Process & Repurpose Viral Clip"):
         progress = st.progress(0)
 
         temp_dir = tempfile.mkdtemp()
-        input_video_path = os.path.join(temp_dir, "uploaded_clip.mp4")
-        
-        # Save uploaded file
-        with open(input_video_path, "wb") as f:
-            f.write(uploaded_video.read())
+        input_video_path = os.path.join(temp_dir, "input_clip.mp4")
 
         try:
-            status.info("1/5: Loading original clip and stripping audio into raw footage...")
-            raw_video = VideoFileClip(input_video_path)
-            
-            # Step 1: Strip original audio to create pure raw footage
-            raw_footage = raw_video.without_audio()
+            # Step 1: Obtain source video file
+            if source_method == "YouTube / Shorts URL":
+                status.info("1/5: Downloading clip from YouTube Shorts URL...")
+                input_video_path = download_clip_from_url(shorts_url.strip(), temp_dir)
+            else:
+                status.info("1/5: Reading uploaded video file...")
+                with open(input_video_path, "wb") as f:
+                    f.write(uploaded_video.read())
+
             progress.progress(20)
 
-            status.info("2/5: Synthesizing new AI voiceover track...")
-            # Step 2: Generate TTS Speech
+            # Step 2: Strip original audio into raw footage
+            status.info("2/5: Stripping original audio to create raw footage...")
+            raw_video = VideoFileClip(input_video_path)
+            raw_footage = raw_video.without_audio()
+
+            # Step 3: Generate TTS AI Voiceover
+            status.info("3/5: Synthesizing AI voiceover track...")
             tld = "co.uk" if "UK" in voice_accent else "co.in" if "Indian" in voice_accent else "com.au" if "Australian" in voice_accent else "com"
             tts = gTTS(text=script_text, lang="en", tld=tld)
             audio_path = os.path.join(temp_dir, "ai_voice.mp3")
             tts.save(audio_path)
-            
+
             ai_audio = AudioFileClip(audio_path)
             audio_duration = ai_audio.duration
-            progress.progress(40)
+            progress.progress(50)
 
-            status.info("3/5: Synchronizing video length with voiceover duration...")
-            # Step 3: Loop or trim raw footage to match new voiceover length
+            # Step 4: Time sync raw video to match speech length
+            status.info("4/5: Syncing video duration with AI voiceover...")
             if raw_footage.duration < audio_duration:
                 repeat_count = int(np.ceil(audio_duration / raw_footage.duration))
                 timed_video = concatenate_videoclips([raw_footage] * repeat_count)
                 timed_video = trim_clip(timed_video, 0, audio_duration)
             else:
                 timed_video = trim_clip(raw_footage, 0, audio_duration)
-            
-            progress.progress(60)
 
-            status.info("4/5: Burning animated word-by-word captions...")
-            # Step 4: Apply frame-by-frame animated captions
+            progress.progress(70)
+
+            # Step 5: Burn animated captions & export
+            status.info("5/5: Burning animated captions and exporting final MP4...")
             captioned_video = apply_frame_transform(
                 timed_video,
                 lambda frame, t: render_animated_caption(frame, t, script_text, audio_duration, caption_style)
             )
-            
-            # Step 5: Attach new AI audio track to the captioned raw footage
-            final_clip = set_clip_audio(captioned_video, ai_audio)
-            progress.progress(80)
 
-            status.info("5/5: Exporting final repurposed MP4 video...")
+            final_clip = set_clip_audio(captioned_video, ai_audio)
             output_mp4_path = os.path.join(temp_dir, "repurposed_viral_clip.mp4")
-            
+
             final_clip.write_videofile(
                 output_mp4_path,
                 fps=24,
@@ -212,11 +236,11 @@ if st.button("🚀 Process & Repurpose Viral Clip"):
             progress.progress(100)
             status.success("🎉 Video Repurposing Complete!")
 
-            # Display Output & Download Button
+            # Display Output & Download
             with open(output_mp4_path, "rb") as f:
                 output_bytes = f.read()
 
-            st.subheader("🎬 Final Repurposed Output")
+            st.subheader("🎬 Final Repurposed Video")
             st.video(output_bytes)
             st.download_button(
                 "📥 Download Repurposed MP4 Video",
