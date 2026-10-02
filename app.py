@@ -7,7 +7,14 @@ import tempfile
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from gtts import gTTS
-from moviepy.editor import ImageClip, AudioFileClip, concatenate_videoclips
+
+# Smart MoviePy Import (Supports both MoviePy v1 and v2+)
+try:
+    from moviepy.editor import ImageClip, AudioFileClip, concatenate_videoclips
+    IS_LEGACY_MOVIEPY = True
+except (ImportError, ModuleNotFoundError):
+    from moviepy import ImageClip, AudioFileClip, concatenate_videoclips
+    IS_LEGACY_MOVIEPY = False
 
 st.set_page_config(
     page_title="ViewMax AI - Free Studio",
@@ -35,7 +42,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Helper: Generate AI Background Image (100% Free via Pollinations AI)
+# Helper: Generate AI Background Image (Free via Pollinations AI)
 def fetch_ai_image(prompt, width, height):
     clean_prompt = requests.utils.quote(prompt)
     url = f"https://pollinations.ai/p/{clean_prompt}?width={width}&height={height}&nologo=true&seed={int(time.time())}"
@@ -45,16 +52,14 @@ def fetch_ai_image(prompt, width, height):
             return Image.open(io.BytesIO(resp.content)).convert("RGB")
     except Exception:
         pass
-    # Fallback solid background
     return Image.new("RGB", (width, height), color=(15, 20, 30))
 
-# Helper: Draw Styled Captions onto Frame
+# Helper: Draw Styled Subtitles
 def overlay_subtitles(image, text, style="Bold Yellow"):
     img = image.copy()
     draw = ImageDraw.Draw(img)
     w, h = img.size
 
-    # Simple word wrapper
     words = text.split()
     lines, current = [], []
     for word in words:
@@ -65,7 +70,6 @@ def overlay_subtitles(image, text, style="Bold Yellow"):
     if current:
         lines.append(" ".join(current))
 
-    # Fallback Font Loading
     try:
         font_size = int(h * 0.05)
         font = ImageFont.truetype("DejaVuSans-Bold.ttf", font_size)
@@ -74,12 +78,10 @@ def overlay_subtitles(image, text, style="Bold Yellow"):
 
     line_height = int(h * 0.06)
     start_y = int(h * 0.70)
-
     color = (255, 220, 0) if "Yellow" in style else (255, 255, 255)
 
     for i, line in enumerate(lines):
         y = start_y + (i * line_height)
-        # Compute text position for center alignment
         try:
             bbox = draw.textbbox((0, 0), line, font=font)
             text_w = bbox[2] - bbox[0]
@@ -87,7 +89,6 @@ def overlay_subtitles(image, text, style="Bold Yellow"):
             text_w = len(line) * 10
         x = (w - text_w) // 2
 
-        # Draw dark outline/shadow for readability
         for dx, dy in [(-2, -2), (-2, 2), (2, -2), (2, 2), (0, 3)]:
             draw.text((x + dx, y + dy), line, font=font, fill=(0, 0, 0))
         draw.text((x, y), line, font=font, fill=color)
@@ -98,7 +99,6 @@ def overlay_subtitles(image, text, style="Bold Yellow"):
 st.sidebar.title("⚙️ Engine Settings")
 aspect = st.sidebar.selectbox("Aspect Ratio", ["9:16 (Shorts/Reels/TikTok)", "16:9 (YouTube Standard)"])
 caption_style = st.sidebar.selectbox("Subtitle Style", ["Bold Yellow (Alex Hormozi Style)", "Clean White"])
-api_key = st.sidebar.text_input("OpenAI API Key (Optional)", type="password", help="If provided, generates custom GPT scripts.")
 
 # Main Interface Header
 st.markdown('<div class="main-title">🎬 ViewMax AI — Free Video Generator</div>', unsafe_allow_html=True)
@@ -108,7 +108,7 @@ col1, col2 = st.columns([1, 1])
 
 with col1:
     st.subheader("1. Video Concept")
-    topic = st.text_input("What is your video topic?", value="3 Mind-Blowing Facts About the Universe")
+    topic = st.text_input("What is your video topic?", value="3 Mind-Blowing Facts About Space")
     style_niche = st.selectbox("Content Niche", ["Fun Facts & Sci-Fi", "Motivation", "Tech & Future", "Dark History"])
     generate_script = st.button("✨ Generate AI Script & Storyboard")
 
@@ -118,7 +118,6 @@ if "storyboard" not in st.session_state:
 if generate_script and topic:
     with st.spinner("Drafting script scenes and AI visual prompts..."):
         time.sleep(1)
-        # Default AI Script Generator Pipeline
         st.session_state.storyboard = [
             {"scene": 1, "text": f"Did you know this insane fact about {topic}?", "visual": f"Cinematic epic space galaxy background, futuristic sci-fi aesthetic, 8k resolution"},
             {"scene": 2, "text": f"Scientists discovered that deep inside, {topic} works in ways we never imagined.", "visual": f"Abstract glowing quantum particles, dark high-tech laboratory concept"},
@@ -144,49 +143,46 @@ if st.button("🚀 Render & Export Complete MP4 Video"):
         status = st.empty()
         progress = st.progress(0)
         
-        # Dimensions setup based on aspect ratio
         width, height = (1080, 1920) if "9:16" in aspect else (1920, 1080)
-        
         scene_clips = []
         temp_dir = tempfile.mkdtemp()
-
         total_scenes = len(st.session_state.storyboard)
         
         try:
             for idx, scene in enumerate(st.session_state.storyboard):
                 status.info(f"Processing Scene {idx+1}/{total_scenes}: Generating AI Voiceover...")
                 
-                # 1. Generate Voiceover Audio (gTTS)
+                # 1. Voiceover (gTTS)
                 tts = gTTS(text=scene["text"], lang="en")
                 audio_path = os.path.join(temp_dir, f"audio_{idx}.mp3")
                 tts.save(audio_path)
                 
                 audio_clip = AudioFileClip(audio_path)
-                duration = audio_clip.duration + 0.4  # Slight buffer
+                duration = audio_clip.duration + 0.4
                 
                 status.info(f"Processing Scene {idx+1}/{total_scenes}: Generating AI Image...")
-                # 2. Generate AI Visual Image
+                # 2. AI Image
                 raw_img = fetch_ai_image(scene["visual"], width, height)
                 
                 status.info(f"Processing Scene {idx+1}/{total_scenes}: Overlaying Subtitles...")
-                # 3. Add Subtitles
+                # 3. Subtitles
                 final_img = overlay_subtitles(raw_img, scene["text"], style=caption_style)
                 
-                # 4. Build MoviePy Clip
+                # 4. Build Clip (Version Safe)
                 img_np = np.array(final_img)
-                clip = ImageClip(img_np).set_duration(duration)
-                clip = clip.set_audio(audio_clip)
+                if IS_LEGACY_MOVIEPY:
+                    clip = ImageClip(img_np).set_duration(duration).set_audio(audio_clip)
+                else:
+                    clip = ImageClip(img_np).with_duration(duration).with_audio(audio_clip)
                 
                 scene_clips.append(clip)
                 progress.progress(int(((idx + 1) / total_scenes) * 70))
 
             status.info("Stitching scenes and compiling final MP4 video...")
             
-            # Concatenate all clips
             final_video = concatenate_videoclips(scene_clips, method="compose")
             output_mp4_path = os.path.join(temp_dir, "viewmax_render.mp4")
             
-            # Export MP4
             final_video.write_videofile(
                 output_mp4_path,
                 fps=24,
@@ -198,7 +194,6 @@ if st.button("🚀 Render & Export Complete MP4 Video"):
             progress.progress(100)
             status.success("🎉 Video Rendering Complete!")
             
-            # Read and Display
             with open(output_mp4_path, "rb") as f:
                 video_bytes = f.read()
                 
