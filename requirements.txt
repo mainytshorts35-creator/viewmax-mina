@@ -1,2 +1,7 @@
 streamlit
 gTTS
+moviepy>=2.0.0
+Pillow
+requests
+numpy
+imageio-ffmpeg
