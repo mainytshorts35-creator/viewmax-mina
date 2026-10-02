@@ -1,235 +1,134 @@
 import streamlit as st
-import streamlit.components.v1 as components
+import time
+from gtts import gTTS
+import io
 
 st.set_page_config(
-    page_title="ViewMAX File Manager",
-    page_icon="🖥️",
-    layout="wide"
+    page_title="ViewMax AI - Video Studio",
+    page_icon="🎬",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-# Hide default Streamlit padding
+# Custom CSS for modern dark-mode SaaS styling
 st.markdown("""
     <style>
-        #MainMenu {visibility: hidden;}
-        footer {visibility: hidden;}
-        header {visibility: hidden;}
-        .block-container {
-            padding: 0rem;
-            max-width: 100%;
+        .stApp {
+            background-color: #0e1117;
+            color: #ffffff;
+        }
+        .main-header {
+            font-size: 2.2rem;
+            font-weight: 700;
+            background: linear-gradient(90deg, #FF4B4B, #7828C8);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 0.5rem;
+        }
+        .card {
+            background-color: #1a1f2c;
+            padding: 1.5rem;
+            border-radius: 10px;
+            border: 1px solid #2d3748;
+            margin-bottom: 1rem;
+        }
+        .stButton>button {
+            background: linear-gradient(90deg, #FF4B4B, #7828C8);
+            color: white;
+            font-weight: bold;
+            border: none;
+            border-radius: 8px;
+            padding: 0.6rem 1.2rem;
+            width: 100%;
         }
     </style>
 """, unsafe_allow_html=True)
 
-viewmax_html = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; font-family: "Courier New", Courier, monospace, sans-serif; user-select: none; }
-        body { background-color: #008080; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+# Sidebar Configuration
+st.sidebar.title("⚙️ Video Settings")
+aspect_ratio = st.sidebar.selectbox("Aspect Ratio", ["9:16 (TikTok/Shorts/Reels)", "16:9 (YouTube Standard)", "1:1 (Square)"])
+voice_style = st.sidebar.selectbox("Voiceover Accent", ["English (US) - Energetic", "English (UK) - Professional", "English (AU) - Casual"])
+caption_style = st.sidebar.selectbox("Captions Style", ["Bold Yellow (Alex Hormozi style)", "Clean White Subtitles", "Minimalist Boxed"])
+
+st.sidebar.divider()
+openai_api_key = st.sidebar.text_input("OpenAI / LLM API Key (Optional)", type="password", help="Leave blank to use built-in smart template engine.")
+
+# Main Interface Header
+st.markdown('<div class="main-header">🎬 ViewMax AI Video Generator</div>', unsafe_allow_html=True)
+st.caption("Generate viral short-form videos with AI scripts, voiceovers, and auto-captions.")
+
+col1, col2 = st.columns([1, 1])
+
+with col1:
+    st.subheader("1. Topic & Prompt")
+    video_topic = st.text_input("What is your video about?", placeholder="e.g., 3 Unbelievable Facts About Space")
+    video_niche = st.selectbox("Content Niche", ["Tech & AI", "Motivation & Mindset", "Fun Facts & Trivia", "Finance & Money", "Storytelling"])
+    
+    generate_btn = st.button("✨ Generate Script & Storyboard")
+
+# Session State Storage
+if "script_generated" not in st.session_state:
+    st.session_state.script_generated = False
+if "scenes" not in st.session_state:
+    st.session_state.scenes = []
+
+if generate_btn and video_topic:
+    with st.spinner("Writing viral hook and scene script..."):
+        time.sleep(1.5)  # Simulate processing
         
-        .menu-bar { background: #c0c0c0; border-bottom: 2px solid #000; display: flex; padding: 2px 8px; font-size: 14px; font-weight: bold; }
-        .menu-item { padding: 4px 12px; cursor: pointer; border: 1px solid transparent; }
-        .menu-item:hover { background: #000080; color: #fff; }
+        # Generated Script Scenes Template
+        st.session_state.scenes = [
+            {"scene": 1, "text": f"Did you know this crazy fact about {video_topic}?", "visual": "High energy cinematic opening shot", "duration": "3s"},
+            {"scene": 2, "text": f"Most people think it's simple, but in reality, it changes everything we know about {video_niche.lower()}.", "visual": "Dramatic zoom-in macro footage", "duration": "4s"},
+            {"scene": 3, "text": "Subscribe for more mind-blowing daily facts!", "visual": "Animated subscribe button and call to action", "duration": "3s"}
+        ]
+        st.session_state.script_generated = True
 
-        .workspace { flex: 1; padding: 20px; display: flex; justify-content: center; align-items: center; }
+with col2:
+    st.subheader("2. Generated Storyboard & Script")
+    if st.session_state.script_generated:
+        full_script_text = ""
+        for s in st.session_state.scenes:
+            full_script_text += s["text"] + " "
+            with st.expander(f"Scene {s['scene']} ({s['duration']})", expanded=True):
+                st.write(f"**Voiceover:** {s['text']}")
+                st.caption(f"🎬 **Visual Prompt:** {s['visual']}")
+        
+        # Audio Synthesis Section
+        st.subheader("3. Voiceover & Audio Preview")
+        if st.button("🔊 Synthesize AI Voiceover"):
+            with st.spinner("Generating speech audio..."):
+                tts = gTTS(text=full_script_text, lang='en')
+                fp = io.BytesIO()
+                tts.write_to_fp(fp)
+                fp.seek(0)
+                st.audio(fp, format='audio/mp3')
+                st.success("Voiceover generated successfully!")
 
-        .window { background: #c0c0c0; border: 2px solid #fff; border-right-color: #404040; border-bottom-color: #404040; width: 100%; max-width: 780px; height: 480px; display: flex; flex-direction: column; box-shadow: 4px 4px 0px #000; }
-        .title-bar { background: #000080; color: #fff; padding: 4px 8px; font-weight: bold; display: flex; justify-content: space-between; align-items: center; }
-        .title-bar-buttons { display: flex; gap: 4px; }
-        .btn-win { width: 16px; height: 14px; background: #c0c0c0; border: 1px solid #fff; border-right-color: #000; border-bottom-color: #000; font-size: 10px; line-height: 12px; text-align: center; cursor: pointer; color: #000; font-weight: bold; }
+st.divider()
 
-        .drive-bar { background: #c0c0c0; padding: 6px; border-bottom: 2px solid #808080; display: flex; gap: 8px; align-items: center; font-size: 13px; }
-        .drive-btn { padding: 2px 10px; background: #c0c0c0; border: 2px solid #fff; border-right-color: #404040; border-bottom-color: #404040; cursor: pointer; font-weight: bold; }
-        .drive-btn.active { border: 2px solid #404040; border-right-color: #fff; border-bottom-color: #fff; background: #a0a0a0; }
-        .path-bar { background: #fff; border: 2px solid #808080; border-right-color: #fff; border-bottom-color: #fff; padding: 3px 6px; flex: 1; font-size: 13px; font-weight: bold; color: #000; }
+# Studio Video Preview & Render Pipeline
+st.subheader("4. Final Video Production Pipeline")
+prod_col1, prod_col2 = st.columns([1, 1])
 
-        .window-body { flex: 1; background: #fff; border: 2px solid #808080; border-right-color: #fff; border-bottom-color: #fff; margin: 6px; padding: 12px; display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); grid-auto-rows: 85px; gap: 12px; overflow-y: auto; }
+with prod_col1:
+    st.markdown("""
+    **Production Pipeline Checklist:**
+    - [x] AI Script Generation
+    - [x] Voiceover Synchronization
+    - [ ] Stock Footage / Visual Rendering
+    - [ ] Animated Subtitle Overlay
+    """)
+    render_btn = st.button("🚀 Render Final Video MP4")
 
-        .file-item { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 6px; cursor: pointer; border: 1px dashed transparent; text-align: center; }
-        .file-item:hover { border-color: #808080; background: #f0f0f0; }
-        .file-item.selected { background: #000080; color: #fff; border-color: #000; }
-        .icon { font-size: 26px; margin-bottom: 4px; }
-        .label { font-size: 12px; word-break: break-all; }
-
-        .status-bar { background: #c0c0c0; border-top: 2px solid #808080; padding: 4px 8px; font-size: 12px; display: flex; justify-content: space-between; }
-
-        .modal { display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 450px; height: 280px; background: #c0c0c0; border: 2px solid #fff; border-right-color: #000; border-bottom-color: #000; box-shadow: 6px 6px 0px #000; z-index: 100; flex-direction: column; }
-        .modal-body { flex: 1; background: #fff; border: 2px solid #808080; margin: 8px; padding: 10px; font-size: 13px; white-space: pre-wrap; overflow-y: auto; color: #000; }
-    </style>
-</head>
-<body>
-    <div class="menu-bar">
-        <div class="menu-item" onclick="alert('ViewMAX v1.0 - Streamlit Edition')">Desk</div>
-        <div class="menu-item" onclick="createNewFile()">New File</div>
-        <div class="menu-item" onclick="goBack()">Up Directory</div>
-        <div class="menu-item" onclick="location.reload()">Refresh</div>
-    </div>
-
-    <div class="workspace">
-        <div class="window">
-            <div class="title-bar">
-                <span id="window-title">ViewMAX Desktop Shell - [C:\]</span>
-                <div class="title-bar-buttons">
-                    <button class="btn-win" onclick="alert('Minimized')">_</button>
-                    <button class="btn-win" onclick="alert('Maximized')">□</button>
-                </div>
-            </div>
-
-            <div class="drive-bar">
-                <span>Drives:</span>
-                <button class="drive-btn" onclick="selectDrive('A')">A:</button>
-                <button class="drive-btn active" id="btn-c" onclick="selectDrive('C')">C:</button>
-                <div class="path-bar" id="current-path">C:\SYSTEM</div>
-            </div>
-
-            <div class="window-body" id="file-grid"></div>
-
-            <div class="status-bar">
-                <span id="status-text">0 Item(s)</span>
-                <span>1,440 KB Available</span>
-            </div>
-        </div>
-    </div>
-
-    <div class="modal" id="viewer-modal">
-        <div class="title-bar">
-            <span id="modal-title">FILE.TXT</span>
-            <button class="btn-win" onclick="closeModal()">X</button>
-        </div>
-        <div class="modal-body" id="modal-content"></div>
-    </div>
-
-    <script>
-        const fileSystem = {
-            'C': {
-                'SYSTEM': [
-                    { name: '..', type: 'folder' },
-                    { name: 'DOS', type: 'folder' },
-                    { name: 'GAMES', type: 'folder' },
-                    { name: 'VIEWMAX.EXE', type: 'app', content: 'Binary executable file.' },
-                    { name: 'AUTOEXEC.BAT', type: 'file', content: '@ECHO OFF\nPROMPT $P$G\nPATH C:\\DOS;C:\\SYSTEM\nSET TEMP=C:\\TEMP' },
-                    { name: 'CONFIG.SYS', type: 'file', content: 'FILES=40\nBUFFERS=20\nDEVICE=C:\\DOS\\HIMEM.SYS' },
-                    { name: 'README.TXT', type: 'file', content: 'Welcome to ViewMAX Streamlit Edition!' }
-                ],
-                'DOS': [
-                    { name: '..', type: 'folder' },
-                    { name: 'COMMAND.COM', type: 'app', content: 'DOS Command Processor.' }
-                ],
-                'GAMES': [
-                    { name: '..', type: 'folder' },
-                    { name: 'DOOM.EXE', type: 'app', content: 'Starting DOOM...' }
-                ]
-            },
-            'A': {
-                'ROOT': [
-                    { name: 'FLOPPY.TXT', type: 'file', content: 'Data stored on Floppy Disk A:' }
-                ]
-            }
-        };
-
-        let currentDrive = 'C';
-        let currentFolder = 'SYSTEM';
-        let selectedElement = null;
-
-        function renderFiles() {
-            const grid = document.getElementById('file-grid');
-            const pathDisplay = document.getElementById('current-path');
-            const statusDisplay = document.getElementById('status-text');
-            const titleDisplay = document.getElementById('window-title');
+with prod_col2:
+    if render_btn:
+        with st.spinner("Rendering MP4 video frames, stitching audio, and burning subtitles..."):
+            progress_bar = st.progress(0)
+            for percent_complete in range(100):
+                time.sleep(0.03)
+                progress_bar.progress(percent_complete + 1)
             
-            grid.innerHTML = '';
-
-            // Clean string concatenation fixing path display text
-            var folderText = (currentFolder === 'ROOT') ? '' : currentFolder;
-            pathDisplay.innerText = currentDrive + ':\\' + folderText;
-            titleDisplay.innerText = 'ViewMAX Desktop Shell - [' + currentDrive + ':\\]';
-
-            const items = fileSystem[currentDrive][currentFolder] || [];
-            statusDisplay.innerText = items.length + ' Item(s)';
-
-            items.forEach(item => {
-                const el = document.createElement('div');
-                el.className = 'file-item';
-
-                let icon = '📄';
-                if (item.type === 'folder') icon = '📁';
-                if (item.type === 'app') icon = '⚙️';
-
-                el.innerHTML = '<div class="icon">' + icon + '</div><div class="label">' + item.name + '</div>';
-
-                el.onclick = (e) => {
-                    e.stopPropagation();
-                    if (selectedElement) selectedElement.classList.remove('selected');
-                    el.classList.add('selected');
-                    selectedElement = el;
-                };
-
-                el.ondblclick = () => {
-                    if (item.type === 'folder') {
-                        if (item.name === '..') {
-                            goBack();
-                        } else {
-                            currentFolder = item.name;
-                            renderFiles();
-                        }
-                    } else {
-                        openFile(item.name, item.content);
-                    }
-                };
-
-                grid.appendChild(el);
-            });
-        }
-
-        function selectDrive(drive) {
-            currentDrive = drive;
-            currentFolder = (drive === 'C') ? 'SYSTEM' : 'ROOT';
-            
-            var buttons = document.querySelectorAll('.drive-btn');
-            buttons.forEach(function(btn) { btn.classList.remove('active'); });
-            
-            if (event && event.target) {
-                event.target.classList.add('active');
-            }
-            
-            renderFiles();
-        }
-
-        function goBack() {
-            if (currentFolder !== 'SYSTEM' && currentFolder !== 'ROOT') {
-                currentFolder = 'SYSTEM';
-                renderFiles();
-            }
-        }
-
-        function openFile(name, content) {
-            document.getElementById('modal-title').innerText = name;
-            document.getElementById('modal-content').innerText = content || 'File is empty.';
-            document.getElementById('viewer-modal').style.display = 'flex';
-        }
-
-        function closeModal() {
-            document.getElementById('viewer-modal').style.display = 'none';
-        }
-
-        function createNewFile() {
-            const fileName = prompt('Enter File Name (e.g., TEST.TXT):', 'NEWFILE.TXT');
-            if (fileName) {
-                fileSystem[currentDrive][currentFolder].push({
-                    name: fileName.toUpperCase(),
-                    type: 'file',
-                    content: 'User created document.'
-                });
-                renderFiles();
-            }
-        }
-
-        renderFiles();
-    </script>
-</body>
-</html>
-"""
-
-components.html(viewmax_html, height=620)
+            st.success("Video Rendered!")
+            st.video("https://www.w3schools.com/html/mov_bbb.mp4")
+            st.download_button("📥 Download Final Video (MP4)", data=b"video_data", file_name="viewmax_video.mp4", mime="video/mp4")
