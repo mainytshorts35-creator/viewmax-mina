@@ -1,7 +1,7 @@
-streamlit
-gTTS
+streamlit>=1.30.0
+gTTS>=2.5.0
 moviepy>=2.0.0
-Pillow
-requests
-numpy
-imageio-ffmpeg
+Pillow>=10.0.0
+requests>=2.31.0
+numpy>=1.24.0
+imageio-ffmpeg>=0.4.9
