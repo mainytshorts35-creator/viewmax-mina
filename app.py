@@ -7,7 +7,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# Remove default Streamlit padding for full-screen view
+# Hide default Streamlit padding
 st.markdown("""
     <style>
         #MainMenu {visibility: hidden;}
@@ -20,7 +20,6 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Render ViewMAX Interface inside Streamlit Component
 viewmax_html = """
 <!DOCTYPE html>
 <html lang="en">
@@ -30,47 +29,39 @@ viewmax_html = """
         * { box-sizing: border-box; margin: 0; padding: 0; font-family: "Courier New", Courier, monospace, sans-serif; user-select: none; }
         body { background-color: #008080; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
         
-        /* Top Menu Bar */
         .menu-bar { background: #c0c0c0; border-bottom: 2px solid #000; display: flex; padding: 2px 8px; font-size: 14px; font-weight: bold; }
         .menu-item { padding: 4px 12px; cursor: pointer; border: 1px solid transparent; }
         .menu-item:hover { background: #000080; color: #fff; }
 
-        /* Main Workspace */
         .workspace { flex: 1; padding: 20px; display: flex; justify-content: center; align-items: center; }
 
-        /* Window Frame */
         .window { background: #c0c0c0; border: 2px solid #fff; border-right-color: #404040; border-bottom-color: #404040; width: 100%; max-width: 780px; height: 480px; display: flex; flex-direction: column; box-shadow: 4px 4px 0px #000; }
         .title-bar { background: #000080; color: #fff; padding: 4px 8px; font-weight: bold; display: flex; justify-content: space-between; align-items: center; }
         .title-bar-buttons { display: flex; gap: 4px; }
         .btn-win { width: 16px; height: 14px; background: #c0c0c0; border: 1px solid #fff; border-right-color: #000; border-bottom-color: #000; font-size: 10px; line-height: 12px; text-align: center; cursor: pointer; color: #000; font-weight: bold; }
 
-        /* Drive & Navigation Bar */
         .drive-bar { background: #c0c0c0; padding: 6px; border-bottom: 2px solid #808080; display: flex; gap: 8px; align-items: center; font-size: 13px; }
         .drive-btn { padding: 2px 10px; background: #c0c0c0; border: 2px solid #fff; border-right-color: #404040; border-bottom-color: #404040; cursor: pointer; font-weight: bold; }
         .drive-btn.active { border: 2px solid #404040; border-right-color: #fff; border-bottom-color: #fff; background: #a0a0a0; }
         .path-bar { background: #fff; border: 2px solid #808080; border-right-color: #fff; border-bottom-color: #fff; padding: 3px 6px; flex: 1; font-size: 13px; font-weight: bold; color: #000; }
 
-        /* File Grid View */
         .window-body { flex: 1; background: #fff; border: 2px solid #808080; border-right-color: #fff; border-bottom-color: #fff; margin: 6px; padding: 12px; display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); grid-auto-rows: 85px; gap: 12px; overflow-y: auto; }
 
-        /* File Item Styling */
         .file-item { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 6px; cursor: pointer; border: 1px dashed transparent; text-align: center; }
         .file-item:hover { border-color: #808080; background: #f0f0f0; }
         .file-item.selected { background: #000080; color: #fff; border-color: #000; }
         .icon { font-size: 26px; margin-bottom: 4px; }
         .label { font-size: 12px; word-break: break-all; }
 
-        /* Status Bar */
         .status-bar { background: #c0c0c0; border-top: 2px solid #808080; padding: 4px 8px; font-size: 12px; display: flex; justify-content: space-between; }
 
-        /* Modal File Viewer */
         .modal { display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 450px; height: 280px; background: #c0c0c0; border: 2px solid #fff; border-right-color: #000; border-bottom-color: #000; box-shadow: 6px 6px 0px #000; z-index: 100; flex-direction: column; }
         .modal-body { flex: 1; background: #fff; border: 2px solid #808080; margin: 8px; padding: 10px; font-size: 13px; white-space: pre-wrap; overflow-y: auto; color: #000; }
     </style>
 </head>
 <body>
     <div class="menu-bar">
-        <div class="menu-item" onclick="alert('ViewMAX v1.0 - Streamlit Cloud')">Desk</div>
+        <div class="menu-item" onclick="alert('ViewMAX v1.0 - Streamlit Edition')">Desk</div>
         <div class="menu-item" onclick="createNewFile()">New File</div>
         <div class="menu-item" onclick="goBack()">Up Directory</div>
         <div class="menu-item" onclick="location.reload()">Refresh</div>
@@ -79,7 +70,7 @@ viewmax_html = """
     <div class="workspace">
         <div class="window">
             <div class="title-bar">
-                <span>ViewMAX Desktop Shell - [C:\]</span>
+                <span id="window-title">ViewMAX Desktop Shell - [C:\]</span>
                 <div class="title-bar-buttons">
                     <button class="btn-win" onclick="alert('Minimized')">_</button>
                     <button class="btn-win" onclick="alert('Maximized')">□</button>
@@ -96,7 +87,7 @@ viewmax_html = """
             <div class="window-body" id="file-grid"></div>
 
             <div class="status-bar">
-                <span id="status-text">6 Item(s)</span>
+                <span id="status-text">0 Item(s)</span>
                 <span>1,440 KB Available</span>
             </div>
         </div>
@@ -118,8 +109,8 @@ viewmax_html = """
                     { name: 'DOS', type: 'folder' },
                     { name: 'GAMES', type: 'folder' },
                     { name: 'VIEWMAX.EXE', type: 'app', content: 'Binary executable file.' },
-                    { name: 'AUTOEXEC.BAT', type: 'file', content: '@ECHO OFF\\nPROMPT $P$G\\nPATH C:\\\\DOS;C:\\\\SYSTEM\\nSET TEMP=C:\\\\TEMP' },
-                    { name: 'CONFIG.SYS', type: 'file', content: 'FILES=40\\nBUFFERS=20\\nDEVICE=C:\\\\DOS\\\\HIMEM.SYS' },
+                    { name: 'AUTOEXEC.BAT', type: 'file', content: '@ECHO OFF\nPROMPT $P$G\nPATH C:\\DOS;C:\\SYSTEM\nSET TEMP=C:\\TEMP' },
+                    { name: 'CONFIG.SYS', type: 'file', content: 'FILES=40\nBUFFERS=20\nDEVICE=C:\\DOS\\HIMEM.SYS' },
                     { name: 'README.TXT', type: 'file', content: 'Welcome to ViewMAX Streamlit Edition!' }
                 ],
                 'DOS': [
@@ -146,12 +137,17 @@ viewmax_html = """
             const grid = document.getElementById('file-grid');
             const pathDisplay = document.getElementById('current-path');
             const statusDisplay = document.getElementById('status-text');
+            const titleDisplay = document.getElementById('window-title');
             
             grid.innerHTML = '';
-            pathDisplay.innerText = `${currentDrive}:\\${currentFolder === 'ROOT' ? '' : currentFolder}`;
+
+            // Clean string concatenation fixing path display text
+            var folderText = (currentFolder === 'ROOT') ? '' : currentFolder;
+            pathDisplay.innerText = currentDrive + ':\\' + folderText;
+            titleDisplay.innerText = 'ViewMAX Desktop Shell - [' + currentDrive + ':\\]';
 
             const items = fileSystem[currentDrive][currentFolder] || [];
-            statusDisplay.innerText = `${items.length} Item(s)`;
+            statusDisplay.innerText = items.length + ' Item(s)';
 
             items.forEach(item => {
                 const el = document.createElement('div');
@@ -161,7 +157,7 @@ viewmax_html = """
                 if (item.type === 'folder') icon = '📁';
                 if (item.type === 'app') icon = '⚙️';
 
-                el.innerHTML = `<div class="icon">${icon}</div><div class="label">${item.name}</div>`;
+                el.innerHTML = '<div class="icon">' + icon + '</div><div class="label">' + item.name + '</div>';
 
                 el.onclick = (e) => {
                     e.stopPropagation();
@@ -189,9 +185,15 @@ viewmax_html = """
 
         function selectDrive(drive) {
             currentDrive = drive;
-            currentFolder = drive === 'C' ? 'SYSTEM' : 'ROOT';
-            document.querySelectorAll('.drive-btn').forEach(btn => btn.classList.remove('active'));
-            event.target.classList.add('active');
+            currentFolder = (drive === 'C') ? 'SYSTEM' : 'ROOT';
+            
+            var buttons = document.querySelectorAll('.drive-btn');
+            buttons.forEach(function(btn) { btn.classList.remove('active'); });
+            
+            if (event && event.target) {
+                event.target.classList.add('active');
+            }
+            
             renderFiles();
         }
 
