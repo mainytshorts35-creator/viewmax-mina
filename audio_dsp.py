@@ -11,6 +11,7 @@ import os
 import sys
 import logging
 import numpy as np
+from typing import Optional
 from scipy.io import wavfile
 from scipy.signal import butter, lfilter
 
@@ -99,7 +100,6 @@ class VocalMasteringProcessor:
         """Applies a simple high-shelf EQ boost for vocal brightness."""
         if gain_db == 0.0:
             return data
-        # Simplified high-frequency boost implementation via shelving approximation
         nyquist = 0.5 * sample_rate
         normal_cutoff = 4000.0 / nyquist
         b, a = butter(1, min(normal_cutoff, 0.99), btype='high', analog=False)
@@ -113,14 +113,12 @@ class VocalMasteringProcessor:
         threshold_linear = 10.0 ** (threshold_db / 20.0)
         abs_data = np.abs(data)
         
-        # Calculate gain reduction envelope
         mask = abs_data > threshold_linear
         compressed = np.copy(data)
         
         if np.any(mask):
             excess = 20.0 * np.log10(abs_data[mask] / threshold_linear + 1e-9)
             reduced = threshold_linear + (excess / ratio) * (10.0 ** (threshold_db / 20.0) - threshold_linear)
-            # Apply reduction factor safely
             with np.errstate(divide='ignore', invalid='ignore'):
                 factor = (reduced / (abs_data[mask] + 1e-9))
                 compressed[mask] = data[mask] * factor
@@ -161,34 +159,28 @@ class SidechainMusicDucker:
         sr_b, bgm_data = wavfile.read(bgm_wav_path)
 
         if sr_v != sr_b:
-            logger.warning(f"Sample rate mismatch between vocals ({sr_v}Hz) and BGM ({sr_b}Hz). Resampling recommended.")
+            logger.warning(f"Sample rate mismatch between vocals ({sr_v}Hz) and BGM ({sr_b}Hz).")
 
         vocal_float = VocalMasteringProcessor._normalize_to_float(vocal_data)
         bgm_float = VocalMasteringProcessor._normalize_to_float(bgm_data)
 
-        # Match lengths (pad or truncate BGM to match vocals)
         if len(bgm_float) < len(vocal_float):
-            # Loop BGM if shorter than vocals
             repeats = int(np.ceil(len(vocal_float) / len(bgm_float)))
             bgm_float = np.tile(bgm_float, repeats)
         
         bgm_float = bgm_float[:len(vocal_float)]
 
-        # Simple RMS-based ducking envelope
-        window_size = int(sr_v * 0.05) # 50ms window
+        window_size = int(sr_v * 0.05)
         duck_multiplier = 10.0 ** (bgm_ducking_gain_db / 20.0)
         
         envelope = np.ones_like(vocal_float)
         for i in range(0, len(vocal_float), window_size):
             chunk = vocal_float[i:i+window_size]
             rms = np.sqrt(np.mean(chunk**2) + 1e-9)
-            if rms > 0.02: # Voice active threshold
+            if rms > 0.02:
                 envelope[i:i+window_size] = duck_multiplier
 
-        # Apply ducking envelope to background music
         ducked_bgm = bgm_float * envelope
-        
-        # Mix vocal speech and ducked BGM (Vocals at 100%, BGM at 30% base volume + ducking)
         mixed = (vocal_float * 1.0) + (ducked_bgm * 0.3)
         mixed = np.clip(mixed, -1.0, 1.0)
 
