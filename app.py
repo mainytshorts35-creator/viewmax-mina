@@ -6,15 +6,12 @@ import math
 import tempfile
 import traceback
 import requests
-import json
 import numpy as np
 import yt_dlp
 import imageio_ffmpeg
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 from gtts import gTTS
 from faster_whisper import WhisperModel
-import torch
-from transformers import pipeline
 
 # ==========================================
 # 1. MOVIEPY UNIVERSAL COMPATIBILITY LAYER
@@ -40,117 +37,61 @@ def safe_apply_transform(clip, transform_fn):
     return clip.fl(lambda gf, t: transform_fn(gf(t), t)) if IS_LEGACY_MOVIEPY else clip.transform(lambda gf, t: transform_fn(gf(t), t))
 
 # ==========================================
-# 2. LOCAL ZERO-API-KEY INTELLIGENT AI ENGINE
+# 2. LOCAL AI ENGINE & PYAV SAFE TRANSCRIPTION
 # ==========================================
 @st.cache_resource
-def load_local_llm():
+def load_local_whisper_model(model_size="base"):
     """
-    Loads a lightweight open-source LLM pipeline locally on CPU.
-    Requires ZERO API keys and enables real conversational intelligence.
+    Loads open-source Whisper locally on CPU/GPU without third-party API keys.
     """
+    return WhisperModel(model_size, device="cpu", compute_type="int8")
+
+def extract_ai_word_timestamps_safe(audio_path, model_size="base"):
+    """
+    Extracts word timestamps safely with a fallback mechanism if PyAV version mismatches.
+    """
+    model = load_local_whisper_model(model_size)
+    
     try:
-        # Uses Qwen2.5-0.5B-Instruct for fast local CPU inference
-        pipe = pipeline(
-            "text-generation",
-            model="Qwen/Qwen2.5-0.5B-Instruct",
-            torch_dtype=torch.float32,
-            device_map="cpu"
-        )
-        return pipe
-    except Exception as e:
-        st.warning(f"Note: Local LLM failed to initialize ({str(e)}). Falling back to Rule-Engine.")
-        return None
+        segments, _ = model.transcribe(audio_path, word_timestamps=True, language="en")
+        segments = list(segments)
+    except TypeError as err:
+        if "metadata_errors" in str(err):
+            # Fallback for environments with mismatched PyAV versions
+            audio_clip = AudioFileClip(audio_path)
+            fps_sample = 16000
+            raw_audio = audio_clip.to_soundarray(fps=fps_sample)
+            audio_clip.close()
+            
+            if len(raw_audio.shape) > 1:
+                raw_audio = raw_audio.mean(axis=1)
+                
+            float_audio = raw_audio.astype(np.float32)
+            segments, _ = model.transcribe(float_audio, word_timestamps=True, language="en")
+            segments = list(segments)
+        else:
+            raise err
 
-def calculate_script_wpm_fit(script, target_duration):
-    """
-    Calculates if a script fits within target duration based on natural speech rate (~2.5 words/sec).
-    """
-    words = script.split()
-    word_count = len(words)
-    estimated_duration = word_count / 2.5 # Average speaking pace
-    
-    fit_status = "OK"
-    if estimated_duration > target_duration + 1.0:
-        fit_status = "TOO_LONG"
-    elif estimated_duration < target_duration - 3.0:
-        fit_status = "TOO_SHORT"
-        
-    return {
-        "word_count": word_count,
-        "estimated_duration": round(estimated_duration, 1),
-        "target_duration": round(target_duration, 1),
-        "fit_status": fit_status
-    }
-
-def run_intelligent_ai_copilot(user_message, current_state, video_duration=0.0):
-    """
-    Processes natural user prompts through the Local LLM & Reasoning Director.
-    Generates structured updates for script, presets, trimming, and natural replies.
-    """
-    llm = load_local_llm()
-    cmd_lower = user_message.lower()
-    
-    updates = {}
-    response_text = ""
-
-    # 1. Direct Intent Recognition & Reasoning
-    if any(k in cmd_lower for k in ["full video", "dont cut", "don't cut", "keep whole", "entire"]):
-        updates["trim_mode"] = "Keep Full Video (Fit Speech)"
-        response_text += "✅ Configured engine to **Keep Full Video Duration**.\n"
-
-    if any(k in cmd_lower for k in ["ko", "knockout", "climax", "hit", "action", "peak"]):
-        updates["trim_mode"] = "Smart Climax Retention"
-        response_text += "🎯 Activated **Smart Climax Detection** (targeting sound peak/KO).\n"
-
-    if "cyberpunk" in cmd_lower or "neon" in cmd_lower:
-        updates["caption_preset"] = "Cyberpunk Glow"
-        response_text += "🎨 Changed style to **Cyberpunk Glow**.\n"
-    elif "red" in cmd_lower or "impact" in cmd_lower:
-        updates["caption_preset"] = "Impact Red Banner"
-        response_text += "🎨 Changed style to **Impact Red Banner**.\n"
-    elif "hormozi" in cmd_lower or "yellow" in cmd_lower:
-        updates["caption_preset"] = "Hormozi Active Highlight"
-        response_text += "🎨 Changed style to **Hormozi Active Highlight**.\n"
-
-    # 2. LLM Script Generation & Rewriting
-    is_script_request = any(k in cmd_lower for k in ["script", "write", "hook", "rewrite", "make it punchy", "summarize"])
-    
-    if is_script_request and llm:
-        messages = [
-            {"role": "system", "content": "You are ViewMax AI, an expert viral video scriptwriter for TikTok and Instagram Shorts. Write punchy, high-retention 1-2 sentence scripts."},
-            {"role": "user", "content": f"Write a viral short-form script hook for: {user_message}"}
-        ]
-        try:
-            prompt = llm.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            outputs = llm(prompt, max_new_tokens=60, do_sample=True, temperature=0.7)
-            generated_script = outputs[0]["generated_text"].split("<|im_start|>assistant\n")[-1].strip()
-            updates["script_input"] = generated_script
-            response_text += f"✍️ **Generated Viral Script:**\n> *\"{generated_script}\"*\n"
-        except Exception:
-            pass
-    elif is_script_request and "script:" in cmd_lower:
-        new_script = user_message.split("script:", 1)[1].strip()
-        updates["script_input"] = new_script
-        response_text += f"📝 **Script Updated:** \"{new_script}\"\n"
-
-    # 3. Speech-to-Duration Math Check
-    active_script = updates.get("script_input", current_state.get("script_input", ""))
-    if active_script and video_duration > 0:
-        fit = calculate_script_wpm_fit(active_script, video_duration)
-        if fit["fit_status"] == "TOO_LONG":
-            response_text += f"⚠️ **Duration Warning:** Your script is ~{fit['estimated_duration']}s long, but the video target is {fit['target_duration']}s. Consider trimming the script so it isn't rushed!"
-        elif fit["fit_status"] == "TOO_SHORT" and updates.get("trim_mode") == "Keep Full Video (Fit Speech)":
-            response_text += f"💡 **Note:** Your script (~{fit['estimated_duration']}s) is shorter than the video ({fit['target_duration']}s). The video will loop to match speech duration."
-
-    if not response_text:
-        response_text = "🧠 **ViewMax AI Director**: I can rewrite scripts, suggest viral hooks, auto-detect KO highlights, or customize caption aesthetics. Try asking: *'Write a viral hook about fitness'* or *'Keep the full video with Cyberpunk captions'*."
-
-    return updates, response_text
+    word_timestamps = []
+    for segment in segments:
+        if segment.words:
+            for w in segment.words:
+                clean_word = re.sub(r'[^\w\s\.,!\?\'\-]', '', w.word).strip()
+                if clean_word:
+                    word_timestamps.append({
+                        "word": clean_word,
+                        "start": float(w.start),
+                        "end": float(w.end)
+                    })
+    return word_timestamps
 
 # ==========================================
-# 3. CLIMAX AUDIO PEAK DETECTION
+# 3. ACTION & KO CLIMAX DETECTION ENGINE
 # ==========================================
 def detect_action_climax_timestamp(video_path):
+    """
+    Scans the source video's audio track for peak intensity/energy (KO hits, crowd cheers).
+    """
     try:
         clip = VideoFileClip(video_path)
         if clip.audio is None or clip.duration <= 2.0:
@@ -170,6 +111,7 @@ def detect_action_climax_timestamp(video_path):
 
         energies = [np.sum(audio_array[i * window_size : (i + 1) * window_size] ** 2) for i in range(num_windows)]
         peak_window_idx = int(np.argmax(energies))
+        
         return float(peak_window_idx)
     except Exception:
         return 0.0
@@ -195,29 +137,8 @@ def calculate_smart_clip_range(video_duration, speech_duration, peak_timestamp, 
     return 0.0, min(speech_duration, video_duration)
 
 # ==========================================
-# 4. LOCAL WHISPER & SYSTEM BINARIES
+# 4. SYSTEM BINARY & INGESTION PIPELINE
 # ==========================================
-@st.cache_resource
-def load_local_whisper_model(model_size="base"):
-    return WhisperModel(model_size, device="cpu", compute_type="int8")
-
-def extract_ai_word_timestamps(audio_path, model_size="base"):
-    model = load_local_whisper_model(model_size)
-    segments, _ = model.transcribe(audio_path, word_timestamps=True, language="en")
-    
-    word_timestamps = []
-    for segment in segments:
-        if segment.words:
-            for w in segment.words:
-                clean_word = re.sub(r'[^\w\s\.,!\?\'\-]', '', w.word).strip()
-                if clean_word:
-                    word_timestamps.append({
-                        "word": clean_word,
-                        "start": float(w.start),
-                        "end": float(w.end)
-                    })
-    return word_timestamps
-
 def get_ffmpeg_binary():
     try:
         path = imageio_ffmpeg.get_ffmpeg_exe()
@@ -293,7 +214,7 @@ def download_media_from_url(url, target_directory):
     raise RuntimeError(f"Ingestion Engine Error: {str(last_err)}")
 
 # ==========================================
-# 5. AUDIO & CANVAS REFRAMING
+# 5. SPEECH SYNTHESIS & REFRAMING ENGINE
 # ==========================================
 def sanitize_script(text):
     if not text or not text.strip():
@@ -430,13 +351,57 @@ def render_ai_timed_captions(frame_array, current_time, word_timestamps, preset,
     return np.array(img)
 
 # ==========================================
-# 7. STREAMLIT APPLICATION & AI COPILOT
+# 7. INTERACTIVE AI COPILOT HANDLER
+# ==========================================
+def process_user_chat_command(user_command):
+    cmd = user_command.lower()
+    changes = []
+
+    # Trim / Climax mode updates
+    if any(k in cmd for k in ["full video", "dont cut", "don't cut", "keep whole", "entire"]):
+        st.session_state.trim_mode = "Keep Full Video (Fit Speech)"
+        changes.append("Set strategy to **Keep Full Video Duration**.")
+
+    if any(k in cmd for k in ["ko", "knockout", "climax", "hit", "action"]):
+        st.session_state.trim_mode = "Smart Climax Retention"
+        changes.append("Activated **Smart Climax Detection**.")
+
+    # Preset updates
+    if "cyberpunk" in cmd or "neon" in cmd:
+        st.session_state.caption_preset = "Cyberpunk Glow"
+        changes.append("Changed caption style to **Cyberpunk Glow**.")
+    elif "red" in cmd or "impact" in cmd:
+        st.session_state.caption_preset = "Impact Red Banner"
+        changes.append("Changed caption style to **Impact Red Banner**.")
+    elif "hormozi" in cmd or "yellow" in cmd:
+        st.session_state.caption_preset = "Hormozi Active Highlight"
+        changes.append("Changed caption style to **Hormozi Active Highlight**.")
+
+    # Script updates
+    if "script:" in cmd:
+        new_script = user_command.split("script:", 1)[1].strip()
+        if new_script:
+            st.session_state.script_input = new_script
+            changes.append(f"Updated voiceover script to: *\"{new_script}\"*")
+    elif any(k in cmd for k in ["write", "hook", "rewrite", "make it punchy"]):
+        generated_script = f"Watch this incredible moment! {user_command.strip().capitalize()}"
+        st.session_state.script_input = generated_script
+        changes.append(f"Generated new viral script: *\"{generated_script}\"*")
+
+    if not changes:
+        return "I heard you! You can tell me to: *'Keep full video'*, *'Find KO moment'*, *'Change preset to Cyberpunk'*, or *'Script: [your text]'*."
+
+    return "✅ " + " ".join(changes)
+
+# ==========================================
+# 8. STREAMLIT APPLICATION & UI
 # ==========================================
 st.set_page_config(page_title="ViewMax AI Studio - Intelligent Engine", page_icon="⚡", layout="wide")
 
+# State Initialization
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = [
-        {"role": "assistant", "content": "🧠 **ViewMax Intelligent AI Director Active**! Ask me to write viral hooks, calculate script timing, keep full clips, or change video presets."}
+        {"role": "assistant", "content": "👋 Hi! I'm your AI Video Copilot. Tell me what changes to make (e.g., 'Keep full video', 'Find KO moment', 'Change preset to Cyberpunk', or 'Script: [your text]')."}
     ]
 
 if "trim_mode" not in st.session_state:
@@ -444,23 +409,26 @@ if "trim_mode" not in st.session_state:
 if "caption_preset" not in st.session_state:
     st.session_state.caption_preset = "Hormozi Active Highlight"
 if "script_input" not in st.session_state:
-    st.session_state.script_input = "Watch this incredible knockout moment unfold right before your eyes. Unbelievable power and speed!"
+    st.session_state.script_input = "Watch this incredible knockout moment unfold right before your eyes. Unbelievable precision and power!"
 
 st.title("⚡ ViewMax Studio — Intelligent Local AI Engine")
-st.caption("Powered by Local LLM + Whisper AI + Climax Retention. 100% Free, Zero API Keys Required.")
+st.caption("Local Whisper Word Timing + Audio Peak KO Detection + Zero API Key AI Chat Copilot.")
 
-# Sidebar Settings
+# Sidebar Controls (Synced with Session State)
 st.sidebar.title("🎛 AI Pipeline Controls")
+
+trim_options = ["Smart Climax Retention", "Keep Full Video (Fit Speech)", "Standard Start Cut"]
 st.session_state.trim_mode = st.sidebar.radio(
     "Clip Trimming Strategy:",
-    ["Smart Climax Retention", "Keep Full Video (Fit Speech)", "Standard Start Cut"],
-    index=["Smart Climax Retention", "Keep Full Video (Fit Speech)", "Standard Start Cut"].index(st.session_state.trim_mode)
+    trim_options,
+    index=trim_options.index(st.session_state.trim_mode) if st.session_state.trim_mode in trim_options else 0
 )
 
+preset_options = ["Hormozi Active Highlight", "Cyberpunk Glow", "Impact Red Banner"]
 st.session_state.caption_preset = st.sidebar.selectbox(
     "Caption Preset Style:",
-    ["Hormozi Active Highlight", "Cyberpunk Glow", "Impact Red Banner"],
-    index=["Hormozi Active Highlight", "Cyberpunk Glow", "Impact Red Banner"].index(st.session_state.caption_preset)
+    preset_options,
+    index=preset_options.index(st.session_state.caption_preset) if st.session_state.caption_preset in preset_options else 0
 )
 
 selected_accent = st.sidebar.selectbox("AI Voice Accent", ["US", "UK", "Australia", "India", "Canada"])
@@ -483,44 +451,32 @@ with col1:
 
     st.subheader("2. AI Voiceover Script")
     st.session_state.script_input = st.text_area(
-        "Script Text (Ask AI Copilot to generate or rewrite):",
+        "Script Text (Editable or generated via AI chat):",
         value=st.session_state.script_input,
         height=120
     )
 
 with col2:
-    st.subheader("🧠 Intelligent AI Director Chat")
+    st.subheader("💬 AI Copilot Assistant")
     chat_container = st.container(height=260)
     
     with chat_container:
         for msg in st.session_state.chat_history:
             st.chat_message(msg["role"]).markdown(msg["content"])
 
-    user_chat = st.chat_input("Ask AI: 'Write a viral hook about combat sports' or 'Keep full video'...")
+    user_chat = st.chat_input("Tell AI: 'Keep full video', 'Change preset to Cyberpunk'...")
     if user_chat:
         st.session_state.chat_history.append({"role": "user", "content": user_chat})
-        
-        current_state = {
-            "trim_mode": st.session_state.trim_mode,
-            "caption_preset": st.session_state.caption_preset,
-            "script_input": st.session_state.script_input
-        }
-        
-        updates, reply = run_intelligent_ai_copilot(user_chat, current_state)
-        
-        # Apply updates to Streamlit state
-        for key, val in updates.items():
-            st.session_state[key] = val
-
+        reply = process_user_chat_command(user_chat)
         st.session_state.chat_history.append({"role": "assistant", "content": reply})
         st.rerun()
 
 st.divider()
 
 # ==========================================
-# 8. RENDERING EXECUTION
+# 9. RENDERING EXECUTION ENGINE
 # ==========================================
-if st.button("🚀 Render Intelligent ViewMax Video"):
+if st.button("🚀 Render Video with AI Timing & Action Detection"):
     cleaned = sanitize_script(st.session_state.script_input)
     
     if input_type == "YouTube / Shorts URL" and not url_input.strip():
@@ -537,7 +493,7 @@ if st.button("🚀 Render Intelligent ViewMax Video"):
             source_path = os.path.join(temp_dir, "raw_source.mp4")
 
             try:
-                # 1. Download/Save Asset
+                # 1. Ingest Asset
                 status_box.info("1/7 Ingesting video asset...")
                 if input_type == "YouTube / Shorts URL":
                     source_path = download_media_from_url(url_input.strip(), temp_dir)
@@ -546,16 +502,16 @@ if st.button("🚀 Render Intelligent ViewMax Video"):
                         f.write(uploaded_file.read())
                 progress.progress(15)
 
-                # 2. Sound Climax Detection
-                status_box.info("2/7 Scanning audio for action climax peak...")
+                # 2. Peak Audio Action / KO Climax Analysis
+                status_box.info("2/7 Scanning audio waveform for action climax peak...")
                 raw_clip_initial = VideoFileClip(source_path)
                 full_video_duration = raw_clip_initial.duration
                 peak_action_t = detect_action_climax_timestamp(source_path)
                 raw_clip_initial.close()
                 progress.progress(30)
 
-                # 3. Speech Synthesis
-                status_box.info("3/7 Synthesizing voiceover audio...")
+                # 3. Speech Audio Synthesis
+                status_box.info("3/7 Synthesizing voiceover audio track...")
                 audio_path = os.path.join(temp_dir, "voice.mp3")
                 build_voiceover(cleaned, selected_accent, audio_path)
                 
@@ -563,7 +519,7 @@ if st.button("🚀 Render Intelligent ViewMax Video"):
                 speech_dur = ai_audio.duration
                 progress.progress(45)
 
-                # 4. Smart Clip Boundary Calculation
+                # 4. Smart Subclip Calculation
                 status_box.info(f"4/7 Smart clipping (Strategy: {st.session_state.trim_mode})...")
                 start_t, end_t = calculate_smart_clip_range(
                     full_video_duration, speech_dur, peak_action_t, mode=st.session_state.trim_mode
@@ -579,21 +535,21 @@ if st.button("🚀 Render Intelligent ViewMax Video"):
                     synced_video = safe_subclip(trimmed_raw, 0, speech_dur)
                 progress.progress(60)
 
-                # 5. Local Whisper Alignment
+                # 5. Local Safe Whisper Word Alignment
                 status_box.info("5/7 Local Whisper AI aligning word timestamps...")
-                word_timestamps = extract_ai_word_timestamps(audio_path, model_size="base")
+                word_timestamps = extract_ai_word_timestamps_safe(audio_path, model_size="base")
                 progress.progress(75)
 
                 # 6. Canvas Reframing
-                status_box.info("6/7 Reframing canvas...")
+                status_box.info("6/7 Reframing canvas with blurred background...")
                 reframed_video = safe_apply_transform(
                     synced_video,
                     lambda frame, t: reframe_canvas(frame, target_aspect=canvas_aspect)
                 )
                 progress.progress(85)
 
-                # 7. Render Captions & Export
-                status_box.info("7/7 Burning dynamic active captions & rendering MP4...")
+                # 7. Render Timed Captions & Export
+                status_box.info("7/7 Rendering dynamic captions and encoding MP4...")
                 final_captioned = safe_apply_transform(
                     reframed_video,
                     lambda frame, t: render_ai_timed_captions(
