@@ -426,8 +426,7 @@ class SidechainMusicDucker:
 # ==============================================================================
 # 5. STANDALONE VERIFICATION / UNIT RUNNER
 # ==============================================================================
-if __name__ == "__main__":
-    logger.info("Running standalone Audio DSP validation test...")
+
     
     # Generate synthetic 44.1kHz sine wave vocal test mock
     sample_rate = 44100
