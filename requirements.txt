@@ -3,7 +3,8 @@ moviepy
 yt-dlp
 imageio-ffmpeg
 pillow
-gTTS
+edge-tts
+duckduckgo-search
 faster-whisper
 av>=11.0.0
 requests
