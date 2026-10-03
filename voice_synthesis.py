@@ -1,286 +1,220 @@
 """
 ================================================================================
-VIEWMAX STUDIO PRO — MULTI-PROVIDER AI SPEECH & VOICE SYNTHESIS ENGINE
-FILE: voice_synthesis.py
-DESCRIPTION: Handles multi-provider text-to-speech generation with ElevenLabs v2 
-             and OpenAI TTS-1-HD, automatic fallback routing, prosody adjustments,
-             and speech duration estimation.
+VIEWMAX STUDIO PRO — CONFIGURATION & ENVIRONMENT MANAGEMENT
+FILE: config.py
+DESCRIPTION: Manages global configuration settings, environment validators,
+             dataclasses for audio DSP, speech providers, typography, and logging.
 ================================================================================
 """
 
 import os
 import sys
-import time
 import logging
-import requests
+import subprocess
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Any, Tuple
-
-from config import (
-    GlobalConfig,
-    VoiceSettings,
-    VoiceProviderEnum,
-    global_config,
-    get_logger
-)
-
-logger = get_logger("ViewMaxPro.VoiceSynthesis")
+from typing import List, Dict, Optional, Any
+from enum import Enum
 
 
 # ==============================================================================
-# 1. CUSTOM EXCEPTIONS & DATA MODELS
+# 1. ENUMS & CONSTANTS
 # ==============================================================================
-class VoiceSynthesisError(Exception):
-    """Base exception for voice synthesis and text-to-speech failures."""
-    pass
+class AspectRatioEnum(Enum):
+    SHORTS_9_16 = "9:16 (YouTube Shorts / TikTok)"
+    LANDSCAPE_16_9 = "16:9 (YouTube Landscape)"
+    SQUARE_1_1 = "1:1 (Instagram Feed)"
 
 
-class APIKeyMissingError(VoiceSynthesisError):
-    """Raised when an active API key is required but missing from configuration."""
-    pass
+class CaptionStyleEnum(Enum):
+    MR_BEAST_POP = "MrBeast Dynamic Pop (Yellow/White bold punch)"
+    HORMOZI_GRADIENT = "Alex Hormozi Impact (High contrast neon highlight)"
+    CINEMATIC_SUBTLE = "Cinematic Minimalist (Clean lower-third)"
 
 
-class ProviderFailureError(VoiceSynthesisError):
-    """Raised when a speech synthesis provider API call fails."""
-    pass
+class VoiceProviderEnum(Enum):
+    ELEVENLABS = "elevenlabs"
+    OPENAI = "openai"
+
+
+# ==============================================================================
+# 2. CONFIGURATION DATACLASSES
+# ==============================================================================
+@dataclass
+class PathConfig:
+    workspace_dir: str = "viewmax_workspace"
+    temp_dir: str = os.path.join("viewmax_workspace", "temp")
+    exports_dir: str = os.path.join("viewmax_workspace", "exports")
+    assets_dir: str = os.path.join("viewmax_workspace", "assets")
+
+    def __post_init__(self):
+        os.makedirs(self.temp_dir, exist_ok=True)
+        os.makedirs(self.exports_dir, exist_ok=True)
+        os.makedirs(self.assets_dir, exist_ok=True)
 
 
 @dataclass
-class VoicePersona:
-    """Defines voice persona parameters for AI speech generation."""
-    key: str
-    display_name: str
-    provider: VoiceProviderEnum
-    voice_id: str  # ElevenLabs Voice ID or OpenAI Voice Name (e.g., 'alloy', 'onyx')
-    model_id: str  # e.g., 'eleven_multilingual_v2' or 'tts-1-hd'
+class CredentialConfig:
+    openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
+    elevenlabs_api_key: str = os.getenv("ELEVENLABS_API_KEY", "")
+
+
+@dataclass
+class AudioDSPConfig:
+    target_lufs: float = -14.0
+    compressor_threshold: float = -16.0
+    compressor_ratio: float = 3.0
+    eq_high_boost_db: float = 3.0
+    bgm_ducking_db: float = -18.0
+
+
+@dataclass
+class VoiceSettings:
+    default_provider: VoiceProviderEnum = VoiceProviderEnum.ELEVENLABS
+    default_voice_id: str = "pNInz6obpgDQGcFmaJgB"
     stability: float = 0.75
     similarity_boost: float = 0.85
-    style_exaggeration: float = 0.0
-    speed: float = 1.0
 
 
-# Builtin predefined voice personas optimized for high-retention short-form videos
-BUILTIN_SPEAKERS: Dict[str, VoicePersona] = {
-    "adam_deep_pro": VoicePersona(
-        key="adam_deep_pro",
-        display_name="Adam (Deep & Authoritative - ElevenLabs)",
-        provider=VoiceProviderEnum.ELEVENLABS,
-        voice_id="pNInz6obpgDQGcFmaJgB",
-        model_id="eleven_multilingual_v2",
-        stability=0.80,
-        similarity_boost=0.90
+@dataclass
+class SafetyConfig:
+    strict_mode: bool = True
+    excluded_keywords: List[str] = field(default_factory=lambda: ["ufc", "fight", "combat", "wholesome moment", "crying"])
+
+
+@dataclass
+class GlobalConfig:
+    paths: PathConfig = field(default_factory=PathConfig)
+    credentials: CredentialConfig = field(default_factory=CredentialConfig)
+    audio: AudioDSPConfig = field(default_factory=AudioDSPConfig)
+    voice: VoiceSettings = field(default_factory=VoiceSettings)
+    safety: SafetyConfig = field(default_factory=SafetyConfig)
+
+    def update_api_keys(self, openai_key: str, elevenlabs_key: str):
+        if openai_key:
+            self.credentials.openai_api_key = openai_key
+            os.environ["OPENAI_API_KEY"] = openai_key
+        if elevenlabs_key:
+            self.credentials.elevenlabs_api_key = elevenlabs_key
+            os.environ["ELEVENLABS_API_KEY"] = elevenlabs_key
+
+
+# Global configuration instance
+global_config = GlobalConfig()
+
+
+# ==============================================================================
+# 3. TYPOGRAPHY & CANVAS PRESETS
+# ==============================================================================
+@dataclass
+class CanvasDimension:
+    width: int
+    height: int
+    name: str
+
+
+@dataclass
+class TypographyStyle:
+    font_name: str
+    font_size: int
+    primary_color: str  # Hex or ASS color format
+    outline_color: str
+    highlight_color: str
+    word_chunk_size: int
+    shadow_depth: int
+
+
+CANVAS_PRESETS: Dict[str, CanvasDimension] = {
+    AspectRatioEnum.SHORTS_9_16.value: CanvasDimension(1080, 1920, "9:16 Vertical"),
+    AspectRatioEnum.LANDSCAPE_16_9.value: CanvasDimension(1920, 1080, "16:9 Landscape"),
+    AspectRatioEnum.SQUARE_1_1.value: CanvasDimension(1080, 1080, "1:1 Square")
+}
+
+TYPOGRAPHY_PRESETS: Dict[str, TypographyStyle] = {
+    CaptionStyleEnum.MR_BEAST_POP.value: TypographyStyle(
+        font_name="Impact",
+        font_size=82,
+        primary_color="&H00FFFFFF&",  # White
+        outline_color="&H00000000&",  # Black outline
+        highlight_color="&H0000FFFF&", # Yellow
+        word_chunk_size=2,
+        shadow_depth=4
     ),
-    "rachel_narrator": VoicePersona(
-        key="rachel_narrator",
-        display_name="Rachel (Clear & Engaging - ElevenLabs)",
-        provider=VoiceProviderEnum.ELEVENLABS,
-        voice_id="21m00Tcm4TlvDq8ikWAM",
-        model_id="eleven_multilingual_v2",
-        stability=0.75,
-        similarity_boost=0.85
+    CaptionStyleEnum.HORMOZI_GRADIENT.value: TypographyStyle(
+        font_name="Arial Black",
+        font_size=76,
+        primary_color="&H00FFFFFF&",
+        outline_color="&H00000000&",
+        highlight_color="&H0000CCFF&", # Orange/Yellow highlight
+        word_chunk_size=3,
+        shadow_depth=3
     ),
-    "openai_onyx": VoicePersona(
-        key="openai_onyx",
-        display_name="Onyx (Deep & Cinematic - OpenAI)",
-        provider=VoiceProviderEnum.OPENAI,
-        voice_id="onyx",
-        model_id="tts-1-hd",
-        speed=1.05
-    ),
-    "openai_alloy": VoicePersona(
-        key="openai_alloy",
-        display_name="Alloy (Balanced & Modern - OpenAI)",
-        provider=VoiceProviderEnum.OPENAI,
-        voice_id="alloy",
-        model_id="tts-1-hd",
-        speed=1.05
+    CaptionStyleEnum.CINEMATIC_SUBTLE.value: TypographyStyle(
+        font_name="Trebuchet MS",
+        font_size=56,
+        primary_color="&H00EFEFEF&",
+        outline_color="&H00222222&",
+        highlight_color="&H00FFFFFF&",
+        word_chunk_size=4,
+        shadow_depth=2
     )
 }
 
 
 # ==============================================================================
-# 2. VOICE SYNTHESIS MANAGER & FAILOVER ROUTER
+# 4. ENVIRONMENT & SYSTEM DIAGNOSTICS
 # ==============================================================================
-class VoiceSynthesisManager:
-    """
-    Manages text-to-speech generation across multiple AI providers with 
-    automatic fallback routing and text chunking for long-form scripts.
-    """
-
-    def __init__(self, config: Optional[GlobalConfig] = None):
-        self.cfg = config or global_config
-        self.speech_cfg = self.cfg.audio
-
-    def generate_narration(
-        self,
-        text_script: str,
-        primary_speaker_key: str = "adam_deep_pro",
-        output_wav_path: str = "output_speech.wav"
-    ) -> str:
-        """
-        Generates spoken audio from text script using primary provider with 
-        automatic failover to secondary provider if errors occur.
-        """
-        if not text_script or not text_script.strip():
-            raise ValueError("Provided text script for voice synthesis is empty.")
-
-        persona = BUILTIN_SPEAKERS.get(primary_speaker_key, BUILTIN_SPEAKERS["adam_deep_pro"])
-
-        logger.info(f"Starting voice synthesis using persona '{persona.display_name}' ({persona.provider.value})...")
-
-        # Attempt primary synthesis
-        try:
-            return self._dispatch_synthesis(text_script, persona, output_wav_path)
-        except Exception as primary_err:
-            logger.warning(f"Primary synthesis provider ({persona.provider.value}) failed: {primary_err}. Attempting failover...")
-            
-            # Fallback to alternative provider
-            fallback_persona = self._get_fallback_persona(persona.provider)
-            logger.info(f"Failing over to fallback persona: '{fallback_persona.display_name}' ({fallback_persona.provider.value})")
-            
-            try:
-                return self._dispatch_synthesis(text_script, fallback_persona, output_wav_path)
-            except Exception as fallback_err:
-                logger.critical(f"Both primary and fallback voice synthesis providers failed. Primary: {primary_err} | Fallback: {fallback_err}")
-                raise ProviderFailureError(f"Voice synthesis failed completely. Details: {fallback_err}")
-
-    def _dispatch_synthesis(self, text: str, persona: VoicePersona, output_path: str) -> str:
-        """Dispatches request to appropriate API client based on persona provider."""
-        if persona.provider == VoiceProviderEnum.ELEVENLABS:
-            return self._synthesize_elevenlabs(text, persona, output_path)
-        elif persona.provider == VoiceProviderEnum.OPENAI:
-            return self._synthesize_openai(text, persona, output_path)
-        else:
-            raise VoiceSynthesisError(f"Unsupported speech provider: {persona.provider}")
-
-    def _synthesize_elevenlabs(self, text: str, persona: VoicePersona, output_path: str) -> str:
-        """Executes Text-to-Speech via ElevenLabs API v2."""
-        api_key = self.cfg.credentials.elevenlabs_api_key
-        if not api_key:
-            raise APIKeyMissingError("ElevenLabs API key is missing. Please enter it in the sidebar settings.")
-
-        url = f"https://api.elevenlabs.io/v1/text-to-speech/{persona.voice_id}"
-        
-        headers = {
-            "Accept": "audio/mpeg",
-            "Content-Type": "application/json",
-            "xi-api-key": api_key
-        }
-
-        payload = {
-            "text": text,
-            "model_id": persona.model_id,
-            "voice_settings": {
-                "stability": persona.stability,
-                "similarity_boost": persona.similarity_boost,
-                "style": persona.style_exaggeration,
-                "use_speaker_boost": True
-            }
-        }
-
-        response = requests.post(url, json=payload, headers=headers, timeout=60)
-        
-        if response.status_code != 200:
-            raise ProviderFailureError(f"ElevenLabs API error (HTTP {response.status_code}): {response.text}")
-
-        # Save downloaded mp3 stream and convert to wav
-        mp3_temp_path = output_path + ".tmp.mp3"
-        with open(mp3_temp_path, "wb") as f:
-            f.write(response.content)
-
-        self._convert_audio_to_wav(mp3_temp_path, output_path)
-        
-        if os.path.exists(mp3_temp_path):
-            os.remove(mp3_temp_path)
-
-        logger.info(f"ElevenLabs speech generated and saved to '{output_path}'.")
-        return output_path
-
-    def _synthesize_openai(self, text: str, persona: VoicePersona, output_path: str) -> str:
-        """Executes Text-to-Speech via OpenAI TTS-1-HD API."""
-        api_key = self.cfg.credentials.openai_api_key
-        if not api_key:
-            raise APIKeyMissingError("OpenAI API key is missing. Please enter it in the sidebar settings.")
-
-        url = "https://api.openai.com/v1/audio/speech"
-        
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        }
-
-        payload = {
-            "model": persona.model_id,
-            "input": text,
-            "voice": persona.voice_id,
-            "response_format": "mp3",
-            "speed": persona.speed
-        }
-
-        response = requests.post(url, json=payload, headers=headers, timeout=60)
-
-        if response.status_code != 200:
-            raise ProviderFailureError(f"OpenAI TTS API error (HTTP {response.status_code}): {response.text}")
-
-        mp3_temp_path = output_path + ".tmp.mp3"
-        with open(mp3_temp_path, "wb") as f:
-            f.write(response.content)
-
-        self._convert_audio_to_wav(mp3_temp_path, output_path)
-
-        if os.path.exists(mp3_temp_path):
-            os.remove(mp3_temp_path)
-
-        logger.info(f"OpenAI speech generated and saved to '{output_path}'.")
-        return output_path
+class EnvironmentValidator:
+    """Validates system binaries (FFmpeg) and workspace folders."""
 
     @staticmethod
-    def _convert_audio_to_wav(input_audio_path: str, output_wav_path: str) -> None:
-        """Converts any audio file to standard 16-bit PCM WAV using FFmpeg or pydub."""
+    def check_ffmpeg() -> tuple[bool, Optional[str]]:
+        """Verifies if ffmpeg is available in system PATH."""
         try:
-            import subprocess
-            cmd = [
-                "ffmpeg", "-y",
-                "-i", input_audio_path,
-                "-ar", "44100",
-                "-ac", "1",
-                "-sample_fmt", "s16",
-                output_wav_path
-            ]
-            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            if result.returncode != 0:
-                raise RuntimeError(result.stderr.decode("utf-8", errors="ignore"))
-        except Exception as e:
-            logger.error(f"Audio format conversion to WAV failed: {e}")
-            raise VoiceSynthesisError(f"Failed to normalize audio file: {e}")
+            result = subprocess.run(["ffmpeg", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if result.returncode == 0:
+                return True, "ffmpeg"
+        except FileNotFoundError:
+            pass
 
-    def _get_fallback_persona(self, failed_provider: VoiceProviderEnum) -> VoicePersona:
-        """Selects a robust failover persona from a different provider."""
-        for key, persona in BUILTIN_SPEAKERS.items():
-            if persona.provider != failed_provider:
-                return persona
-        return BUILTIN_SPEAKERS["openai_alloy"]
+        # Check common paths or imageio_ffmpeg if installed
+        try:
+            import imageio_ffmpeg
+            bin_path = imageio_ffmpeg.get_ffmpeg_exe()
+            if os.path.exists(bin_path):
+                return True, bin_path
+        except Exception:
+            pass
 
-    def estimate_speaking_duration(self, text: str, words_per_minute: int = 150) -> float:
-        """Estimates audio speaking duration in seconds based on word count."""
-        if not text:
-            return 0.0
-        words = text.split()
-        num_words = len(words)
-        duration_mins = num_words / float(words_per_minute)
-        return max(1.0, duration_mins * 60.0)
+        return False, None
+
+    @classmethod
+    def run_full_diagnostics(cls, paths: PathConfig) -> Dict[str, Any]:
+        """Runs complete system check for deployment readiness."""
+        ffmpeg_ok, ffmpeg_path = cls.check_ffmpeg()
+        
+        report = {
+            "ffmpeg_available": ffmpeg_ok,
+            "ffmpeg_path": ffmpeg_path,
+            "workspace_dirs_ready": os.path.exists(paths.temp_dir) and os.path.exists(paths.exports_dir)
+        }
+        return report
 
 
-# ==============================================================================
-# 3. STANDALONE VERIFICATION RUNNER
-# ==============================================================================
+def get_logger(name: str) -> logging.Logger:
+    """Returns a consistently configured logger for the application suite."""
+    logger = logging.getLogger(name)
+    if not logger.handlers:
+        logger.setLevel(logging.INFO)
+        handler = logging.StreamHandler(sys.stdout)
+        formatter = logging.Formatter("%(asctime)s | [%(levelname)s] | %(name)s %(funcName)s | %(message)s")
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+    return logger
+
+
 if __name__ == "__main__":
-    logger.info("Running standalone Voice Synthesis module verification...")
-    sample_text = "Welcome to ViewMax Studio Pro. High retention kinetic video generation is fully initialized."
-    
-    manager = VoiceSynthesisManager(global_config)
-    dur_est = manager.estimate_speaking_duration(sample_text)
-    
-    print(f"Sample Text: '{sample_text}'")
-    print(f"Estimated Speaking Duration: {dur_est:.2f} seconds")
-    print("Voice synthesis module suite fully operational.")
+    logger = get_logger("ViewMaxPro.Config")
+    logger.info("Running standalone Configuration diagnostics...")
+    diag = EnvironmentValidator.run_full_diagnostics(global_config.paths)
+    print(f"Diagnostics Report: {diag}")
+    print("Configuration module fully operational.")
