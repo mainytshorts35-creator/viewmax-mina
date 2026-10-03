@@ -5,5 +5,6 @@ imageio-ffmpeg
 pillow
 gTTS
 faster-whisper
+av>=11.0.0
 requests
 numpy
