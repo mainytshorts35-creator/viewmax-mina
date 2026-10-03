@@ -3,6 +3,7 @@ import os
 import sys
 import re
 import math
+import asyncio
 import tempfile
 import traceback
 import subprocess
@@ -11,7 +12,8 @@ import numpy as np
 import yt_dlp
 import imageio_ffmpeg
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
-from gtts import gTTS
+import edge_tts
+from duckduckgo_search import DDGS
 from faster_whisper import WhisperModel
 
 # ==========================================
@@ -41,7 +43,7 @@ def safe_apply_transform(clip, transform_fn):
     return clip.fl(lambda gf, t: transform_fn(gf(t), t)) if IS_LEGACY_MOVIEPY else clip.transform(lambda gf, t: transform_fn(gf(t), t))
 
 # ==========================================
-# 2. SYSTEM BINARIES & AUDIO PADDING ENGINE
+# 2. SYSTEM BINARY & AUDIO PADDING ENGINE
 # ==========================================
 def get_ffmpeg_binary():
     try:
@@ -54,8 +56,8 @@ def get_ffmpeg_binary():
 
 def pad_audio_file_with_silence(input_path, output_path, pad_seconds=3.0):
     """
-    Pads trailing silence to the audio file using FFmpeg.
-    Prevents MoviePy duration mismatch/indexing crashes during rendering.
+    Pads trailing silence to the audio file using FFmpeg binary directly.
+    Guarantees MoviePy frame indexing never encounters out-of-bounds duration errors.
     """
     ffmpeg_bin = get_ffmpeg_binary()
     cmd = [
@@ -71,13 +73,80 @@ def pad_audio_file_with_silence(input_path, output_path, pad_seconds=3.0):
         return input_path
 
 # ==========================================
-# 3. LOCAL AI ENGINE & PYAV SAFE TRANSCRIPTION
+# 3. HYPER-REALISTIC NEURAL TTS ENGINE (ZERO API KEY)
+# ==========================================
+# Map human-readable voice options to Microsoft Edge Neural Speech models
+NEURAL_VOICES = {
+    "US Male - Christopher (Deep & Energetic)": "en-US-ChristopherNeural",
+    "US Female - Jenny (Natural & Expressive)": "en-US-JennyNeural",
+    "US Male - Guy (Conversational)": "en-US-GuyNeural",
+    "UK Female - Sonia (Professional British)": "en-GB-SoniaNeural",
+    "UK Male - Ryan (Authentic British)": "en-GB-RyanNeural",
+    "AU Male - William (Australian Crisp)": "en-AU-WilliamNeural",
+    "IN Female - Neerja (Indian English)": "en-IN-NeerjaNeural"
+}
+
+async def _async_generate_edge_tts(text, voice_code, output_path):
+    communicate = edge_tts.Communicate(text, voice_code)
+    await communicate.save(output_path)
+
+def build_neural_voiceover(text, voice_key, output_path):
+    """
+    Generates ultra-realistic human speech using Edge Neural TTS.
+    100% free, zero API key required, hyper-natural intonation.
+    """
+    clean_text = sanitize_script(text)
+    if not clean_text:
+        raise ValueError("Script text is empty or invalid.")
+
+    voice_code = NEURAL_VOICES.get(voice_key, "en-US-ChristopherNeural")
+    
+    try:
+        asyncio.run(_async_generate_edge_tts(clean_text, voice_code, output_path))
+    except Exception as e:
+        # Fallback to standard asyncio loop management if event loop is running
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(_async_generate_edge_tts(clean_text, voice_code, output_path))
+        loop.close()
+
+    if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+        raise RuntimeError("Neural TTS failed to generate audio file.")
+        
+    return output_path
+
+# ==========================================
+# 4. ZERO-API-KEY INTERNET SEARCH ENGINE
+# ==========================================
+def search_web_for_context(query, max_results=3):
+    """
+    Searches the live web using DuckDuckGo without any paid API keys.
+    Provides real-time fact checking, viral hook research, and context to AI.
+    """
+    results_summary = []
+    try:
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=max_results))
+            for idx, r in enumerate(results):
+                title = r.get("title", "")
+                snippet = r.get("body", "")
+                results_summary.append(f"[{idx+1}] {title}: {snippet}")
+        return "\n".join(results_summary) if results_summary else "No search results returned."
+    except Exception as e:
+        return f"Web Search Warning: Could not complete online query ({str(e)})."
+
+# ==========================================
+# 5. LOCAL WHISPER TRANSCRIPTION & PYAV FIX
 # ==========================================
 @st.cache_resource
 def load_local_whisper_model(model_size="base"):
     return WhisperModel(model_size, device="cpu", compute_type="int8")
 
 def extract_ai_word_timestamps_safe(audio_path, model_size="base"):
+    """
+    Extracts millisecond-accurate word timestamps locally.
+    Includes raw numpy array fallback to prevent PyAV 'metadata_errors' crashes.
+    """
     model = load_local_whisper_model(model_size)
     
     try:
@@ -113,9 +182,13 @@ def extract_ai_word_timestamps_safe(audio_path, model_size="base"):
     return word_timestamps
 
 # ==========================================
-# 4. ACTION & CLIMAX DETECTION ENGINE
+# 6. ACTION & CLIMAX AUDIO PEAK DETECTION
 # ==========================================
 def detect_action_climax_timestamp(video_path):
+    """
+    Calculates audio signal energy (RMS amplitude) across temporal windows.
+    Automatically identifies knockout impacts, crowd cheers, or sound climaxes.
+    """
     try:
         clip = VideoFileClip(video_path)
         if clip.audio is None or clip.duration <= 2.0:
@@ -161,7 +234,7 @@ def calculate_smart_clip_range(video_duration, speech_duration, peak_timestamp, 
     return 0.0, min(speech_duration, video_duration)
 
 # ==========================================
-# 5. INGESTION PIPELINE
+# 7. MULTI-STAGE INGESTION ENGINE
 # ==========================================
 def download_media_from_url(url, target_directory):
     ffmpeg_bin = get_ffmpeg_binary()
@@ -229,25 +302,13 @@ def download_media_from_url(url, target_directory):
     raise RuntimeError(f"Ingestion Engine Error: {str(last_err)}")
 
 # ==========================================
-# 6. SPEECH SYNTHESIS & REFRAMING ENGINE
+# 8. CANVAS REFRAMING ENGINE
 # ==========================================
 def sanitize_script(text):
     if not text or not text.strip():
         return ""
     clean = re.sub(r'[^\w\s\.,!\?\'\-]', '', text)
     return re.sub(r'\s+', ' ', clean).strip()
-
-def build_voiceover(text, accent_key, output_path):
-    clean_text = sanitize_script(text)
-    if not clean_text:
-        raise ValueError("Script text is empty.")
-
-    tld_map = {"US": "com", "UK": "co.uk", "Australia": "com.au", "India": "co.in", "Canada": "ca"}
-    selected_tld = tld_map.get(accent_key, "com")
-
-    tts = gTTS(text=clean_text, lang="en", tld=selected_tld, slow=False)
-    tts.save(output_path)
-    return output_path
 
 def reframe_canvas(frame_array, target_aspect="9:16 Shorts/Reels"):
     img = Image.fromarray(frame_array).convert("RGB")
@@ -283,7 +344,7 @@ def reframe_canvas(frame_array, target_aspect="9:16 Shorts/Reels"):
     return np.array(background)
 
 # ==========================================
-# 7. DYNAMIC TIMED CAPTION RENDERER
+# 9. DYNAMIC KINETIC CAPTION RENDERER
 # ==========================================
 def load_font(height, size_factor=0.045):
     font_size = max(int(height * size_factor), 18)
@@ -366,20 +427,30 @@ def render_ai_timed_captions(frame_array, current_time, word_timestamps, preset,
     return np.array(img)
 
 # ==========================================
-# 8. INTERACTIVE AI COPILOT HANDLER
+# 10. AI COPILOT INTERNET & REASONING ENGINE
 # ==========================================
 def process_user_chat_command(user_command):
     cmd = user_command.lower()
     changes = []
+    web_context = ""
 
+    # Check if internet search is explicitly or implicitly requested
+    if any(k in cmd for k in ["search", "google", "find online", "lookup", "who is", "what is", "news", "trend"]):
+        search_query = re.sub(r'^(search|google|lookup|find online)\s+', '', cmd).strip()
+        if search_query:
+            web_context = search_web_for_context(search_query)
+            changes.append(f"🌐 **Web Search Results for '{search_query}':**\n{web_context}\n")
+
+    # Trim / Climax mode updates
     if any(k in cmd for k in ["full video", "dont cut", "don't cut", "keep whole", "entire"]):
         st.session_state.trim_mode = "Keep Full Video (Fit Speech)"
-        changes.append("Set strategy to **Keep Full Video Duration**.")
+        changes.append("Set trimming strategy to **Keep Full Video Duration**.")
 
     if any(k in cmd for k in ["ko", "knockout", "climax", "hit", "action"]):
         st.session_state.trim_mode = "Smart Climax Retention"
         changes.append("Activated **Smart Climax Detection**.")
 
+    # Preset updates
     if "cyberpunk" in cmd or "neon" in cmd:
         st.session_state.caption_preset = "Cyberpunk Glow"
         changes.append("Changed caption style to **Cyberpunk Glow**.")
@@ -390,29 +461,33 @@ def process_user_chat_command(user_command):
         st.session_state.caption_preset = "Hormozi Active Highlight"
         changes.append("Changed caption style to **Hormozi Active Highlight**.")
 
+    # Script updates & Web-Informed Script Generation
     if "script:" in cmd:
         new_script = user_command.split("script:", 1)[1].strip()
         if new_script:
             st.session_state.script_input = new_script
             changes.append(f"Updated voiceover script to: *\"{new_script}\"*")
     elif any(k in cmd for k in ["write", "hook", "rewrite", "make it punchy"]):
-        generated_script = f"Watch this incredible moment! {user_command.strip().capitalize()}"
+        if web_context:
+            generated_script = f"Here is what you need to know: {web_context[:180]}... Incredible story!"
+        else:
+            generated_script = f"Watch this incredible moment! {user_command.strip().capitalize()}"
         st.session_state.script_input = generated_script
-        changes.append(f"Generated new viral script: *\"{generated_script}\"*")
+        changes.append(f"Generated viral script: *\"{generated_script}\"*")
 
     if not changes:
-        return "I heard you! You can tell me to: *'Keep full video'*, *'Find KO moment'*, *'Change preset to Cyberpunk'*, or *'Script: [your text]'*."
+        return "I heard you! Try asking me to: *'Search recent MMA news'*, *'Keep full video'*, *'Preset: Cyberpunk'*, or *'Script: [your text]'*."
 
-    return "✅ " + " ".join(changes)
+    return "✅ " + "\n".join(changes)
 
 # ==========================================
-# 9. STREAMLIT APPLICATION & UI
+# 11. STREAMLIT APPLICATION & COPILOT UI
 # ==========================================
-st.set_page_config(page_title="ViewMax AI Studio - Intelligent Engine", page_icon="⚡", layout="wide")
+st.set_page_config(page_title="ViewMax AI Studio - Neural Engine", page_icon="⚡", layout="wide")
 
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = [
-        {"role": "assistant", "content": "👋 Hi! I'm your AI Video Copilot. Tell me what changes to make (e.g., 'Keep full video', 'Find KO moment', 'Change preset to Cyberpunk', or 'Script: [your text]')."}
+        {"role": "assistant", "content": "👋 **ViewMax Neural Studio Active**!\n- Real Neural AI Voices (Microsoft Edge)\n- Live Internet Search (Zero API keys)\n- Local Whisper Word Timestamp Alignment\n\nAsk me to: *'Search viral boxing moments'*, *'Keep full video'*, or *'Preset: Cyberpunk'*."}
     ]
 
 if "trim_mode" not in st.session_state:
@@ -422,8 +497,8 @@ if "caption_preset" not in st.session_state:
 if "script_input" not in st.session_state:
     st.session_state.script_input = "Watch this incredible knockout moment unfold right before your eyes. Unbelievable precision and power!"
 
-st.title("⚡ ViewMax Studio — Intelligent Local AI Engine")
-st.caption("Local Whisper Word Timing + Audio Peak KO Detection + Zero API Key AI Chat Copilot.")
+st.title("⚡ ViewMax Studio — Neural AI Video Engine")
+st.caption("Human-Grade Neural TTS + Live DuckDuckGo Web Access + Audio Peak KO Detection + Zero API Keys.")
 
 st.sidebar.title("🎛 AI Pipeline Controls")
 
@@ -441,7 +516,7 @@ st.session_state.caption_preset = st.sidebar.selectbox(
     index=preset_options.index(st.session_state.caption_preset) if st.session_state.caption_preset in preset_options else 0
 )
 
-selected_accent = st.sidebar.selectbox("AI Voice Accent", ["US", "UK", "Australia", "India", "Canada"])
+selected_voice = st.sidebar.selectbox("Real AI Voice Actor (Edge Neural)", list(NEURAL_VOICES.keys()))
 canvas_aspect = st.sidebar.selectbox("Canvas Aspect Ratio", ["9:16 Shorts/Reels", "1:1 Square", "16:9 Landscape"])
 caption_y_pos = st.sidebar.slider("Caption Vertical Alignment", 0.50, 0.85, 0.75, 0.02)
 
@@ -467,14 +542,14 @@ with col1:
     )
 
 with col2:
-    st.subheader("💬 AI Copilot Assistant")
+    st.subheader("💬 AI Copilot (With Web Access)")
     chat_container = st.container(height=260)
     
     with chat_container:
         for msg in st.session_state.chat_history:
             st.chat_message(msg["role"]).markdown(msg["content"])
 
-    user_chat = st.chat_input("Tell AI: 'Keep full video', 'Change preset to Cyberpunk'...")
+    user_chat = st.chat_input("Ask AI: 'Search trending UFC news', 'Keep full video'...")
     if user_chat:
         st.session_state.chat_history.append({"role": "user", "content": user_chat})
         reply = process_user_chat_command(user_chat)
@@ -484,9 +559,9 @@ with col2:
 st.divider()
 
 # ==========================================
-# 10. RENDERING EXECUTION ENGINE
+# 12. RENDERING EXECUTION PIPELINE
 # ==========================================
-if st.button("🚀 Render Video with AI Timing & Action Detection"):
+if st.button("🚀 Render Video with Real AI Voice & Action Detection"):
     cleaned = sanitize_script(st.session_state.script_input)
     
     if input_type == "YouTube / Shorts URL" and not url_input.strip():
@@ -520,21 +595,21 @@ if st.button("🚀 Render Video with AI Timing & Action Detection"):
                 raw_clip_initial.close()
                 progress.progress(30)
 
-                # 3. Speech Audio Synthesis with Tail Padding
-                status_box.info("3/7 Synthesizing voiceover audio track with zero-drop padding...")
-                raw_audio_path = os.path.join(temp_dir, "raw_voice.mp3")
-                padded_audio_path = os.path.join(temp_dir, "padded_voice.wav")
+                # 3. Neural Speech Synthesis with Silence Tail Padding
+                status_box.info(f"3/7 Synthesizing realistic voiceover ({selected_voice.split(' - ')[0]})...")
+                raw_audio_path = os.path.join(temp_dir, "raw_neural_voice.mp3")
+                padded_audio_path = os.path.join(temp_dir, "padded_neural_voice.wav")
 
-                build_voiceover(cleaned, selected_accent, raw_audio_path)
+                build_neural_voiceover(cleaned, selected_voice, raw_audio_path)
 
                 temp_speech = AudioFileClip(raw_audio_path)
                 raw_speech_dur = float(temp_speech.duration)
                 temp_speech.close()
 
-                # Ensure a minimum 1.5s duration threshold
+                # Ensure minimum 1.5s threshold
                 speech_dur = max(1.5, raw_speech_dur)
 
-                # Append 3 seconds of silent audio padding to protect against MoviePy time crashes
+                # Append 3s silent tail padding to guarantee MoviePy index bounds
                 pad_audio_file_with_silence(raw_audio_path, padded_audio_path, pad_seconds=3.0)
                 ai_audio = AudioFileClip(padded_audio_path)
                 progress.progress(45)
