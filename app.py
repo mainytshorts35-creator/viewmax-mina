@@ -1,496 +1,371 @@
 """
 ================================================================================
-VIEWMAX STUDIO PRO — KINETIC CAPTION & TYPOGRAPHY RENDERING ENGINE
-FILE: caption_renderer.py
-DESCRIPTION: High-resolution PIL kinetic caption renderer, Faster-Whisper word-level
-             timestamp aligner, ASS dynamic subtitle script generator, and 
-             MoviePy video frame compositor.
+VIEWMAX STUDIO PRO — MASTER STREAMLIT DASHBOARD & PIPELINE ORCHESTRATOR
+FILE: app.py
+DESCRIPTION: Interactive Streamlit web interface for downloading YouTube Shorts,
+             stripping original audio, synthesizing AI voiceovers, generating
+             dynamic kinetic captions, blending background music, and rendering
+             high-retention vertical videos.
 ================================================================================
 """
 
 import os
 import sys
-import math
-import logging
-from dataclasses import dataclass, field
-from typing import List, Tuple, Dict, Optional, Any, Union
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+import time
+import shutil
+import tempfile
+import subprocess
 import numpy as np
+import streamlit as st
 
-from config import (
-    TypographyStyle,
-    CaptionStyleEnum,
-    TYPOGRAPHY_PRESETS,
-    CanvasDimension,
-    CANVAS_PRESETS,
-    WhisperSettings,
-    global_config,
-    get_logger
+# MUST BE THE VERY FIRST STREAMLIT COMMAND EXECUTED
+st.set_page_config(
+    page_title="ViewMax Studio Pro",
+    page_icon="🎬",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-logger = get_logger("ViewMaxPro.CaptionRenderer")
+from config import (
+    global_config,
+    CANVAS_PRESETS,
+    TYPOGRAPHY_PRESETS,
+    AspectRatioEnum,
+    CaptionStyleEnum,
+    VoiceProviderEnum,
+    EnvironmentValidator,
+    get_logger
+)
+from audio_dsp import VocalMasteringProcessor, SidechainMusicDucker
+from voice_synthesis import VoiceSynthesisManager, BUILTIN_SPEAKERS
+from caption_renderer import (
+    WhisperAlignmentEngine,
+    PILCaptionGraphicsEngine,
+    ASSSubtitleBuilder,
+    MoviePyCaptionCompositor
+)
+
+logger = get_logger("ViewMaxPro.App")
 
 
 # ==============================================================================
-# 1. CUSTOM EXCEPTIONS & DATA MODELS
+# 1. HELPER FUNCTIONS & PIPELINE COMPONENTS
 # ==============================================================================
-class CaptionError(Exception):
-    """Base exception for caption and typography rendering errors."""
-    pass
+def download_youtube_video(url: str, output_dir: str) -> str:
+    """Downloads YouTube Shorts video using yt-dlp."""
+    output_template = os.path.join(output_dir, "downloaded_raw_input.%(ext)s")
+    cmd = [
+        "yt-dlp",
+        "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        "--merge-output-format", "mp4",
+        "-o", output_template,
+        url
+    ]
+    
+    st.info("📥 Downloading source video via yt-dlp...")
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"yt-dlp download failed: {result.stderr}")
+
+    downloaded_file = os.path.join(output_dir, "downloaded_raw_input.mp4")
+    if not os.path.exists(downloaded_file):
+        files = [os.path.join(output_dir, f) for f in os.listdir(output_dir) if f.endswith(".mp4")]
+        if files:
+            downloaded_file = files[0]
+        else:
+            raise FileNotFoundError("Downloaded MP4 video file could not be located.")
+
+    return downloaded_file
 
 
-class WhisperAlignmentError(CaptionError):
-    """Raised when audio transcription or word timestamp alignment fails."""
-    pass
+def strip_audio_from_video(video_path: str, output_path: str) -> str:
+    """Strips audio track from video file, returning raw muted footage."""
+    _, ffmpeg_bin = EnvironmentValidator.check_ffmpeg()
+    if not ffmpeg_bin:
+        ffmpeg_bin = "ffmpeg"
+
+    cmd = [
+        ffmpeg_bin, "-y",
+        "-i", video_path,
+        "-an",
+        "-c:v", "copy",
+        output_path
+    ]
+    
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode != 0:
+        cmd_reencode = [
+            ffmpeg_bin, "-y",
+            "-i", video_path,
+            "-an",
+            "-c:v", "libx264",
+            "-preset", "fast",
+            output_path
+        ]
+        subprocess.run(cmd_reencode, check=True)
+
+    return output_path
 
 
-class FontRenderError(CaptionError):
-    """Raised when font files cannot be loaded or rendered."""
-    pass
+def render_composite_video(
+    muted_video_path: str,
+    mastered_audio_path: str,
+    ass_subtitle_path: Optional[str],
+    output_final_path: str,
+    canvas_dimension
+) -> str:
+    """Muxes mastered audio, applies web-compatible video encodings, and burns dynamic ASS captions."""
+    _, ffmpeg_bin = EnvironmentValidator.check_ffmpeg()
+    if not ffmpeg_bin:
+        ffmpeg_bin = "ffmpeg"
 
+    vf_filters = [
+        f"scale={canvas_dimension.width}:{canvas_dimension.height}:force_original_aspect_ratio=decrease",
+        f"pad={canvas_dimension.width}:{canvas_dimension.height}:(ow-iw)/2:(oh-ih)/2:black"
+    ]
 
-@dataclass
-class WordTimestamp:
-    """Represents a single word with precise millisecond timestamps."""
-    word: str
-    start_time: float
-    end_time: float
-    confidence: float = 1.0
+    if ass_subtitle_path and os.path.exists(ass_subtitle_path):
+        escaped_ass = ass_subtitle_path.replace("\\", "/").replace(":", "\\:")
+        vf_filters.append(f"subtitles='{escaped_ass}'")
 
-    @property
-    def duration(self) -> float:
-        return max(0.01, self.end_time - self.start_time)
+    filter_chain = ",".join(vf_filters)
 
+    # Added -pix_fmt yuv420p and -movflags +faststart to solve black video rendering
+    cmd = [
+        ffmpeg_bin, "-y",
+        "-i", muted_video_path,
+        "-i", mastered_audio_path,
+        "-vf", filter_chain,
+        "-c:v", "libx264",
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
+        "-preset", "medium",
+        "-crf", "18",
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-shortest",
+        output_final_path
+    ]
 
-@dataclass
-class CaptionChunk:
-    """Group of words displayed together on-screen as a single animated sentence block."""
-    chunk_id: int
-    words: List[WordTimestamp]
-    start_time: float
-    end_time: float
+    logger.info(f"Executing final FFmpeg render pipeline for '{output_final_path}'...")
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"FFmpeg render pipeline failed: {result.stderr}")
 
-    @property
-    def full_text(self) -> str:
-        return " ".join([w.word for w in self.words])
-
-
-@dataclass
-class RenderedCaptionFrame:
-    """Rendered PIL image layer with positioning metadata for video frame blending."""
-    image: Image.Image
-    bbox: Tuple[int, int, int, int]  # (x1, y1, x2, y2)
-    start_time: float
-    end_time: float
+    return output_final_path
 
 
 # ==============================================================================
-# 2. FASTER-WHISPER ALIGNMENT ENGINE
+# 2. STREAMLIT USER INTERFACE LAYOUT
 # ==============================================================================
-class WhisperAlignmentEngine:
-    """
-    Extracts word-level timestamps from vocal audio files using Faster-Whisper
-    with dynamic fallback estimation.
-    """
+def main():
+    st.title("🎬 ViewMax Studio Pro")
+    st.caption("Automated Short-Form Video Repurposing & Dynamic Kinetic Typography Engine")
 
-    def __init__(self, settings: Optional[WhisperSettings] = None):
-        self.cfg = settings or global_config.whisper
-        self.model = None
+    diag_report = EnvironmentValidator.run_full_diagnostics(global_config.paths)
 
-    def _initialize_model(self) -> None:
-        """Lazy-loads the Faster-Whisper model into memory."""
-        if self.model is not None:
+    # --------------------------------------------------------------------------
+    # SIDEBAR: CONFIGURATION & CREDENTIALS
+    # --------------------------------------------------------------------------
+    with st.sidebar:
+        st.header("⚙️ System Credentials & Settings")
+        
+        openai_key_input = st.text_input(
+            "OpenAI API Key",
+            type="password",
+            value=os.getenv("OPENAI_API_KEY", ""),
+            help="Required for GPT-4o narrative scripting and OpenAI TTS-1-HD."
+        )
+        
+        elevenlabs_key_input = st.text_input(
+            "ElevenLabs API Key",
+            type="password",
+            value=os.getenv("ELEVENLABS_API_KEY", ""),
+            help="Optional high-fidelity voice synthesis engine."
+        )
+
+        global_config.update_api_keys(
+            openai_key=openai_key_input,
+            elevenlabs_key=elevenlabs_key_input
+        )
+
+        st.divider()
+        st.header("🎨 Rendering Options")
+
+        aspect_choice = st.selectbox(
+            "Target Aspect Ratio",
+            options=[e.value for e in AspectRatioEnum],
+            index=0
+        )
+        selected_canvas = CANVAS_PRESETS[aspect_choice]
+
+        style_choice = st.selectbox(
+            "Caption Typography Style",
+            options=[e.value for e in CaptionStyleEnum],
+            index=0
+        )
+        selected_style = TYPOGRAPHY_PRESETS[style_choice]
+
+        speaker_choice_key = st.selectbox(
+            "VoicePersona Model",
+            options=list(BUILTIN_SPEAKERS.keys()),
+            format_func=lambda k: BUILTIN_SPEAKERS[k].display_name,
+            index=0
+        )
+
+        st.divider()
+        st.header("🎛️ Audio Processing & DSP")
+        enable_dsp = st.checkbox("Enable Broadcast Vocal DSP", value=True)
+        enable_bgm_ducking = st.checkbox("Enable Dynamic BGM Ducking", value=False)
+
+    # --------------------------------------------------------------------------
+    # MAIN WORKSPACE: CONTENT PROCESSING PIPELINE
+    # --------------------------------------------------------------------------
+    st.subheader("1. Source Video & Narrative Input")
+    
+    col1, col2 = st.columns([1, 1])
+
+    with col1:
+        youtube_url = st.text_input(
+            "YouTube Shorts URL",
+            placeholder="https://www.youtube.com/shorts/..."
+        )
+        uploaded_file = st.file_uploader("Or Upload Video File (MP4/MOV)", type=["mp4", "mov"])
+
+    with col2:
+        script_text = st.text_area(
+            "Narration Script",
+            height=150,
+            placeholder="Type or paste the new narration script here. The original video audio will be stripped and replaced with this speech and kinetic captions."
+        )
+
+    bgm_file = None
+    if enable_bgm_ducking:
+        bgm_file = st.file_uploader("Upload Optional Background Music (WAV/MP3)", type=["wav", "mp3"])
+
+    if script_text and global_config.safety.strict_mode:
+        lowered_script = script_text.lower()
+        forbidden_matches = [kw for kw in global_config.safety.excluded_keywords if kw in lowered_script]
+        if forbidden_matches:
+            st.error(f"⚠️ Script violates target niche scope. Contains restricted topics: {', '.join(forbidden_matches)}")
+
+    st.divider()
+
+    # --------------------------------------------------------------------------
+    # PIPELINE EXECUTION
+    # --------------------------------------------------------------------------
+    if st.button("🚀 Render Repurposed Video", type="primary", use_container_width=True):
+        if not script_text.strip():
+            st.warning("Please enter a valid narration script before starting the pipeline.")
             return
 
+        if not youtube_url and not uploaded_file:
+            st.warning("Please provide either a YouTube Shorts URL or upload a local video file.")
+            return
+
+        temp_dir = tempfile.mkdtemp(dir=global_config.paths.temp_dir)
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+
         try:
-            from faster_whisper import WhisperModel
-            logger.info(f"Loading Faster-Whisper model ('{self.cfg.model_size}') on device '{self.cfg.device}'...")
-            self.model = WhisperModel(
-                self.cfg.model_size,
-                device=self.cfg.device,
-                compute_type=self.cfg.compute_type
+            status_text.text("Step 1/6: Processing source video input...")
+            progress_bar.progress(15)
+
+            if youtube_url:
+                raw_video_path = download_youtube_video(youtube_url, temp_dir)
+            else:
+                raw_video_path = os.path.join(temp_dir, "uploaded_input.mp4")
+                with open(raw_video_path, "wb") as f:
+                    f.write(uploaded_file.getbuffer())
+
+            status_text.text("Step 2/6: Stripping original audio track...")
+            progress_bar.progress(30)
+            muted_video_path = os.path.join(temp_dir, "muted_footage.mp4")
+            strip_audio_from_video(raw_video_path, muted_video_path)
+
+            status_text.text("Step 3/6: Synthesizing AI voiceover speech...")
+            progress_bar.progress(45)
+            voice_mgr = VoiceSynthesisManager(global_config)
+            raw_speech_path = os.path.join(temp_dir, "raw_speech.wav")
+            synthesis_res = voice_mgr.generate_narration(
+                text_script=script_text,
+                primary_speaker_key=speaker_choice_key,
+                output_wav_path=raw_speech_path
             )
-            logger.info("Faster-Whisper model successfully loaded.")
-        except ImportError:
-            logger.warning("faster_whisper package not installed. Using fallback heuristic aligner.")
-            self.model = "FALLBACK"
-        except Exception as e:
-            logger.error(f"Failed to load Faster-Whisper model: {e}. Switching to fallback aligner.")
-            self.model = "FALLBACK"
 
-    def transcribe_and_align(self, audio_path: str, reference_text: Optional[str] = None) -> List[WordTimestamp]:
-        """
-        Transcribes audio or aligns provided reference text to extract word timings.
-        """
-        if not os.path.exists(audio_path):
-            raise FileNotFoundError(f"Audio file for alignment not found: {audio_path}")
-
-        self._initialize_model()
-
-        if self.model != "FALLBACK":
-            try:
-                segments, info = self.model.transcribe(
-                    audio_path,
-                    beam_size=self.cfg.beam_size,
-                    word_timestamps=True,
-                    language=self.cfg.language
-                )
-
-                word_timestamps: List[WordTimestamp] = []
-                for segment in segments:
-                    if segment.words:
-                        for w in segment.words:
-                            cleaned_word = w.word.strip().upper()
-                            if cleaned_word:
-                                word_timestamps.append(
-                                    WordTimestamp(
-                                        word=cleaned_word,
-                                        start_time=w.start,
-                                        end_time=w.end,
-                                        confidence=w.probability
-                                    )
-                                )
-
-                if word_timestamps:
-                    logger.info(f"Extracted {len(word_timestamps)} word timestamps via Faster-Whisper.")
-                    return word_timestamps
-
-            except Exception as e:
-                logger.warning(f"Whisper alignment execution error: {e}. Falling back to estimate engine.")
-
-        # Fallback heuristic timestamp estimator
-        return self._estimate_timestamps_heuristic(audio_path, reference_text)
-
-    def _estimate_timestamps_heuristic(self, audio_path: str, text: Optional[str]) -> List[WordTimestamp]:
-        """Calculates linear fallback word timing using audio file duration."""
-        import wave
-        
-        duration = 5.0
-        try:
-            with wave.open(audio_path, 'rb') as wf:
-                duration = float(wf.getnframes()) / float(wf.getframerate())
-        except Exception as e:
-            logger.warning(f"Failed to inspect wave file duration for fallback alignment: {e}")
-
-        raw_text = text or "DYNAMIC KINETIC TYPOGRAPHY CAPTION SYSTEM"
-        words = [w.strip().upper() for w in raw_text.split() if w.strip()]
-        
-        if not words:
-            return []
-
-        time_per_word = duration / float(len(words))
-        timestamps = []
-
-        for i, word in enumerate(words):
-            start = i * time_per_word
-            end = (i + 1) * time_per_word
-            timestamps.append(WordTimestamp(word=word, start_time=start, end_time=end, confidence=0.85))
-
-        logger.info(f"Heuristic alignment generated timings for {len(words)} words over {duration:.2f}s.")
-        return timestamps
-
-    def build_caption_chunks(self, words: List[WordTimestamp], chunk_size: int = 3) -> List[CaptionChunk]:
-        """Groups individual word timestamps into multi-word caption chunks."""
-        chunks: List[CaptionChunk] = []
-        if not words:
-            return chunks
-
-        for i in range(0, len(words), chunk_size):
-            group = words[i:i + chunk_size]
-            chunk_id = len(chunks) + 1
-            c_start = group[0].start_time
-            c_end = group[-1].end_time
-            chunks.append(CaptionChunk(chunk_id=chunk_id, words=group, start_time=c_start, end_time=c_end))
-
-        return chunks
-
-
-# ==============================================================================
-# 3. HIGH-RESOLUTION PIL GRAPHICS ENGINE
-# ==============================================================================
-class PILCaptionGraphicsEngine:
-    """
-    Renders kinetic typographic captions onto transparent PIL RGBA images with
-    stroke outlines, glow diffusion, and active-word highlighting effects.
-    """
-
-    def __init__(self, style: TypographyStyle, canvas: CanvasDimension):
-        self.style = style
-        self.canvas = canvas
-        self.font = self._load_font()
-
-    def _load_font(self) -> ImageFont.FreeTypeFont:
-        """Loads target TrueType font file or falls back to system font."""
-        target_size = int(self.canvas.height * self.style.font_size_pct)
-        font_path = global_config.paths.font_path
-
-        if os.path.exists(font_path):
-            try:
-                return ImageFont.truetype(font_path, size=target_size)
-            except Exception as e:
-                logger.warning(f"Error loading TTF font '{font_path}': {e}")
-
-        # Fallback font resolution
-        try:
-            return ImageFont.truetype("DejaVuSans-Bold.ttf", size=target_size)
-        except IOError:
-            logger.warning("Defaulting to basic PIL load_default font.")
-            return ImageFont.load_default()
-
-    def render_chunk_frame(
-        self,
-        chunk: CaptionChunk,
-        active_word_index: int
-    ) -> Image.Image:
-        """
-        Renders a full caption chunk image layer with specific word highlighted.
-        """
-        img = Image.new("RGBA", (self.canvas.width, self.canvas.height), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(img)
-
-        words = [w.word for w in chunk.words]
-        if not words:
-            return img
-
-        # Measure dimensions for each word in chunk
-        word_widths = []
-        word_heights = []
-        for w in words:
-            bbox = self.font.getbbox(w)
-            w_width = bbox[2] - bbox[0]
-            w_height = bbox[3] - bbox[1]
-            word_widths.append(w_width)
-            word_heights.append(w_height)
-
-        space_bbox = self.font.getbbox(" ")
-        space_width = space_bbox[2] - space_bbox[0]
-        total_width = sum(word_widths) + (space_width * (len(words) - 1))
-        max_height = max(word_heights) if word_heights else 30
-
-        # Calculate base horizontal and vertical centers
-        start_x = (self.canvas.width - total_width) // 2
-        base_y = int(self.canvas.height * self.style.y_position_pct) - (max_height // 2)
-
-        curr_x = start_x
-
-        for idx, word_str in enumerate(words):
-            is_active = (idx == active_word_index)
+            status_text.text("Step 4/6: Applying vocal mastering and DSP dynamic processing...")
+            progress_bar.progress(60)
+            mastered_speech_path = os.path.join(temp_dir, "mastered_speech.wav")
             
-            # Select color and offset for active word
-            fill_color = self.style.active_color if is_active else self.style.inactive_color
-            y_offset = -int(self.canvas.height * self.style.active_y_lift_pct) if is_active else 0
-            word_y = base_y + y_offset
+            if enable_dsp:
+                dsp_proc = VocalMasteringProcessor(global_config.audio)
+                dsp_proc.process_voice_chain(raw_speech_path, mastered_speech_path)
+            else:
+                shutil.copy(raw_speech_path, mastered_speech_path)
 
-            # 1. Draw Glow Layer if Enabled
-            if self.style.glow_enabled and is_active:
-                self._draw_word_glow(
-                    img, word_str, curr_x, word_y,
-                    self.style.glow_color, self.style.glow_radius
+            final_audio_track = mastered_speech_path
+
+            if enable_bgm_ducking and bgm_file:
+                bgm_input_path = os.path.join(temp_dir, "bgm_input.wav")
+                with open(bgm_input_path, "wb") as f:
+                    f.write(bgm_file.getbuffer())
+
+                mixed_audio_path = os.path.join(temp_dir, "mixed_master.wav")
+                ducker = SidechainMusicDucker(global_config.audio)
+                ducker.mix_bgm_with_sidechain(mastered_speech_path, bgm_input_path, mixed_audio_path)
+                final_audio_track = mixed_audio_path
+
+            status_text.text("Step 5/6: Extracting word timestamps & rendering kinetic typography...")
+            progress_bar.progress(75)
+            
+            aligner = WhisperAlignmentEngine(global_config.whisper)
+            word_timings = aligner.transcribe_and_align(mastered_speech_path, reference_text=script_text)
+            chunks = aligner.build_caption_chunks(word_timings, chunk_size=selected_style.word_chunk_size)
+
+            ass_path = os.path.join(temp_dir, "kinetic_subtitles.ass")
+            ASSSubtitleBuilder.generate_ass_script(
+                chunks=chunks,
+                style=selected_style,
+                canvas=selected_canvas,
+                output_ass_path=ass_path
+            )
+
+            status_text.text("Step 6/6: Rendering composite video and burning dynamic captions...")
+            progress_bar.progress(90)
+            
+            export_filename = f"viewmax_render_{int(time.time())}.mp4"
+            final_export_path = os.path.join(global_config.paths.exports_dir, export_filename)
+
+            render_composite_video(
+                muted_video_path=muted_video_path,
+                mastered_audio_path=final_audio_track,
+                ass_subtitle_path=ass_path,
+                output_final_path=final_export_path,
+                canvas_dimension=selected_canvas
+            )
+
+            progress_bar.progress(100)
+            status_text.text("🎉 Processing complete! Render ready.")
+
+            st.success(f"Video rendered successfully! Exported to: `{final_export_path}`")
+            
+            st.subheader("📺 Video Preview")
+            st.video(final_export_path)
+
+            with open(final_export_path, "rb") as video_bytes:
+                st.download_button(
+                    label="💾 Download Rendered Video MP4",
+                    data=video_bytes,
+                    file_name=export_filename,
+                    mime="video/mp4"
                 )
 
-            # 2. Draw Stroke / Outline
-            stroke_w = self.style.stroke_width
-            stroke_c = self.style.stroke_color + (255,)
-            for dx in range(-stroke_w, stroke_w + 1):
-                for dy in range(-stroke_w, stroke_w + 1):
-                    if dx * dx + dy * dy <= stroke_w * stroke_w:
-                        draw.text(
-                            (curr_x + dx, word_y + dy),
-                            word_str,
-                            font=self.font,
-                            fill=stroke_c
-                        )
-
-            # 3. Draw Core Text
-            fill_rgba = fill_color + (255,)
-            draw.text((curr_x, word_y), word_str, font=self.font, fill=fill_rgba)
-
-            curr_x += word_widths[idx] + space_width
-
-        return img
-
-    def _draw_word_glow(
-        self,
-        base_img: Image.Image,
-        text: str,
-        x: int,
-        y: int,
-        glow_rgb: Tuple[int, int, int],
-        radius: int
-    ) -> None:
-        """Draws a Gaussian blurred glow behind active kinetic text."""
-        glow_layer = Image.new("RGBA", (self.canvas.width, self.canvas.height), (0, 0, 0, 0))
-        glow_draw = ImageDraw.Draw(glow_layer)
-
-        glow_fill = glow_rgb + (220,)
-        
-        # Render bold thick text for glow source
-        for dx in range(-radius, radius + 1):
-            for dy in range(-radius, radius + 1):
-                glow_draw.text((x + dx, y + dy), text, font=self.font, fill=glow_fill)
-
-        blurred_glow = glow_layer.filter(ImageFilter.GaussianBlur(radius=radius))
-        base_img.alpha_composite(blurred_glow)
+        except Exception as e:
+            logger.critical(f"Pipeline execution encountered fatal error: {e}", exc_info=True)
+            st.error(f"❌ Pipeline Failed: {str(e)}")
+            progress_bar.progress(0)
+            status_text.text("Pipeline execution halted due to errors.")
 
 
-# ==============================================================================
-# 4. ADVANCED SUBSTATION ALPHA (ASS) SCRIPT EXPORTER
-# ==============================================================================
-class ASSSubtitleBuilder:
-    """
-    Exports word timing metadata into stylized ASS subtitle files
-    compatible with FFmpeg burning filters.
-    """
-
-    @staticmethod
-    def rgb_to_ass_color(rgb: Tuple[int, int, int]) -> str:
-        """Converts RGB tuple to ASS hex color format (&H00BBGGRR)."""
-        r, g, b = rgb
-        return f"&H00{b:02X}{g:02X}{r:02X}"
-
-    @classmethod
-    def generate_ass_script(
-        cls,
-        chunks: List[CaptionChunk],
-        style: TypographyStyle,
-        canvas: CanvasDimension,
-        output_ass_path: str
-    ) -> str:
-        """Generates full .ass subtitle script file on disk."""
-        primary_color = cls.rgb_to_ass_color(style.inactive_color)
-        active_color = cls.rgb_to_ass_color(style.active_color)
-        outline_color = cls.rgb_to_ass_color(style.stroke_color)
-
-        font_size = int(canvas.height * style.font_size_pct)
-        margin_v = int(canvas.height * (1.0 - style.y_position_pct))
-
-        ass_header = f"""[Script Info]
-Title: ViewMax Kinetic Captions
-ScriptType: v4.00+
-WrapStyle: 0
-PlayResX: {canvas.width}
-PlayResY: {canvas.height}
-ScaledBorderAndShadow: yes
-
-[V4+ Styles]
-Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: KineticStyle,Impact,{font_size},{primary_color},{active_color},{outline_color},&H80000000,-1,0,0,0,100,100,0,0,1,{style.stroke_width},0,2,20,20,{margin_v},1
-
-[Events]
-Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-"""
-
-        events = []
-        for chunk in chunks:
-            for idx, word_obj in enumerate(chunk.words):
-                start_str = cls._format_ass_time(word_obj.start_time)
-                end_str = cls._format_ass_time(word_obj.end_time)
-
-                # Format sentence with primary highlight on active word
-                formatted_words = []
-                for w_idx, w_item in enumerate(chunk.words):
-                    if w_idx == idx:
-                        formatted_words.append(f"{{\\c{active_color}\\b1}}{w_item.word}{{\\rKineticStyle}}")
-                    else:
-                        formatted_words.append(w_item.word)
-
-                dialogue_text = " ".join(formatted_words)
-                event_line = f"Dialogue: 0,{start_str},{end_str},KineticStyle,,0,0,0,,{dialogue_text}"
-                events.append(event_line)
-
-        with open(output_ass_path, "w", encoding="utf-8") as f:
-            f.write(ass_header + "\n".join(events))
-
-        logger.info(f"Generated ASS subtitle file: {output_ass_path}")
-        return output_ass_path
-
-    @staticmethod
-    def _format_ass_time(seconds: float) -> str:
-        """Formats seconds float to ASS timestamp format (H:MM:SS.cc)."""
-        hours = int(seconds // 3600)
-        minutes = int((seconds % 3600) // 60)
-        secs = int(seconds % 60)
-        centisecs = int(round((seconds - int(seconds)) * 100))
-        if centisecs >= 100:
-            centisecs = 99
-        return f"{hours}:{minutes:02d}:{secs:02d}.{centisecs:02d}"
-
-
-# ==============================================================================
-# 5. MOVIEPY VIDEO OVERLAY COMPOSITOR
-# ==============================================================================
-class MoviePyCaptionCompositor:
-    """
-    Integrates rendered PIL image caption layers with MoviePy VideoClips.
-    """
-
-    def __init__(self, style_preset: str = CaptionStyleEnum.HORMOZI_GOLD.value):
-        self.style = TYPOGRAPHY_PRESETS.get(style_preset, TYPOGRAPHY_PRESETS[CaptionStyleEnum.HORMOZI_GOLD.value])
-
-    def overlay_captions_on_clip(
-        self,
-        video_clip,
-        chunks: List[CaptionChunk],
-        canvas: CanvasDimension
-    ):
-        """
-        Creates MoviePy ImageClips for each word frame and composites over base clip.
-        """
-        try:
-            from moviepy.editor import ImageClip, CompositeVideoClip
-        except ImportError:
-            logger.error("MoviePy is required for overlay_captions_on_clip.")
-            return video_clip
-
-        gfx_engine = PILCaptionGraphicsEngine(self.style, canvas)
-        caption_clips = []
-
-        logger.info(f"Compositing captions across {len(chunks)} text chunks...")
-
-        for chunk in chunks:
-            for idx, word_obj in enumerate(chunk.words):
-                duration = word_obj.end_time - word_obj.start_time
-                if duration <= 0:
-                    continue
-
-                pil_frame = gfx_engine.render_chunk_frame(chunk, active_word_index=idx)
-                np_frame = np.array(pil_frame)
-
-                img_clip = (
-                    ImageClip(np_frame)
-                    .set_start(word_obj.start_time)
-                    .set_duration(duration)
-                    .set_position(("center", "center"))
-                )
-                caption_clips.append(img_clip)
-
-        final_clip = CompositeVideoClip([video_clip] + caption_clips)
-        return final_clip
-
-
-# ==============================================================================
-# 6. STANDALONE VERIFICATION RUNNER
-# ==============================================================================
 if __name__ == "__main__":
-    logger.info("Running standalone Caption Renderer test...")
-
-    canvas_preset = CANVAS_PRESETS[global_config.default_canvas]
-    style_preset = TYPOGRAPHY_PRESETS[global_config.default_style]
-
-    gfx = PILCaptionGraphicsEngine(style_preset, canvas_preset)
-
-    mock_words = [
-        WordTimestamp("VIEWMAX", 0.0, 0.4),
-        WordTimestamp("STUDIO", 0.4, 0.8),
-        WordTimestamp("PRO", 0.8, 1.2)
-    ]
-    mock_chunk = CaptionChunk(chunk_id=1, words=mock_words, start_time=0.0, end_time=1.2)
-
-    rendered_img = gfx.render_chunk_frame(mock_chunk, active_word_index=1)
-    
-    test_export_path = os.path.join(global_config.paths.temp_dir, "caption_preview_test.png")
-    rendered_img.save(test_export_path)
-
-    print(f"Sample frame rendered successfully: {test_export_path}")
-    print(f"Canvas resolution: {canvas_preset.width}x{canvas_preset.height}")
-    print("Caption renderer suite fully operational.")
+    main()
