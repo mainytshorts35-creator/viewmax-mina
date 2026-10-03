@@ -483,9 +483,6 @@ class VoiceSynthesisManager:
 # ==============================================================================
 # 7. STANDALONE VERIFICATION RUNNER
 # ==============================================================================
-if __name__ == "__main__":
-    logger.info("Running standalone Voice Synthesis Engine test...")
-    manager = VoiceSynthesisManager()
 
     sample_text = (
         "In the darkest depths of the ocean, strange luminescence illuminates "
