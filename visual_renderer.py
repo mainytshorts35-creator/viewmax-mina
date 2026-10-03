@@ -471,8 +471,6 @@ class MoviePyCaptionCompositor:
 # ==============================================================================
 # 6. STANDALONE VERIFICATION RUNNER
 # ==============================================================================
-if __name__ == "__main__":
-    logger.info("Running standalone Caption Renderer test...")
 
     canvas_preset = CANVAS_PRESETS[global_config.default_canvas]
     style_preset = TYPOGRAPHY_PRESETS[global_config.default_style]
