@@ -5,6 +5,7 @@ import re
 import math
 import tempfile
 import traceback
+import subprocess
 import requests
 import numpy as np
 import yt_dlp
@@ -33,23 +34,50 @@ def safe_set_audio(clip, audio_clip):
 def safe_subclip(clip, start_time, end_time):
     return clip.subclip(start_time, end_time) if IS_LEGACY_MOVIEPY else clip.subclipped(start_time, end_time)
 
+def safe_set_duration(clip, duration):
+    return clip.set_duration(duration) if IS_LEGACY_MOVIEPY else clip.with_duration(duration)
+
 def safe_apply_transform(clip, transform_fn):
     return clip.fl(lambda gf, t: transform_fn(gf(t), t)) if IS_LEGACY_MOVIEPY else clip.transform(lambda gf, t: transform_fn(gf(t), t))
 
 # ==========================================
-# 2. LOCAL AI ENGINE & PYAV SAFE TRANSCRIPTION
+# 2. SYSTEM BINARIES & AUDIO PADDING ENGINE
+# ==========================================
+def get_ffmpeg_binary():
+    try:
+        path = imageio_ffmpeg.get_ffmpeg_exe()
+        if path and os.path.exists(path):
+            return path
+    except Exception:
+        pass
+    return "ffmpeg"
+
+def pad_audio_file_with_silence(input_path, output_path, pad_seconds=3.0):
+    """
+    Pads trailing silence to the audio file using FFmpeg.
+    Prevents MoviePy duration mismatch/indexing crashes during rendering.
+    """
+    ffmpeg_bin = get_ffmpeg_binary()
+    cmd = [
+        ffmpeg_bin, "-y", "-i", input_path,
+        "-af", f"apad=pad_dur={pad_seconds}",
+        "-c:a", "pcm_s16le",
+        output_path
+    ]
+    try:
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        return output_path
+    except Exception:
+        return input_path
+
+# ==========================================
+# 3. LOCAL AI ENGINE & PYAV SAFE TRANSCRIPTION
 # ==========================================
 @st.cache_resource
 def load_local_whisper_model(model_size="base"):
-    """
-    Loads open-source Whisper locally on CPU/GPU without third-party API keys.
-    """
     return WhisperModel(model_size, device="cpu", compute_type="int8")
 
 def extract_ai_word_timestamps_safe(audio_path, model_size="base"):
-    """
-    Extracts word timestamps safely with a fallback mechanism if PyAV version mismatches.
-    """
     model = load_local_whisper_model(model_size)
     
     try:
@@ -57,7 +85,6 @@ def extract_ai_word_timestamps_safe(audio_path, model_size="base"):
         segments = list(segments)
     except TypeError as err:
         if "metadata_errors" in str(err):
-            # Fallback for environments with mismatched PyAV versions
             audio_clip = AudioFileClip(audio_path)
             fps_sample = 16000
             raw_audio = audio_clip.to_soundarray(fps=fps_sample)
@@ -86,12 +113,9 @@ def extract_ai_word_timestamps_safe(audio_path, model_size="base"):
     return word_timestamps
 
 # ==========================================
-# 3. ACTION & KO CLIMAX DETECTION ENGINE
+# 4. ACTION & CLIMAX DETECTION ENGINE
 # ==========================================
 def detect_action_climax_timestamp(video_path):
-    """
-    Scans the source video's audio track for peak intensity/energy (KO hits, crowd cheers).
-    """
     try:
         clip = VideoFileClip(video_path)
         if clip.audio is None or clip.duration <= 2.0:
@@ -137,17 +161,8 @@ def calculate_smart_clip_range(video_duration, speech_duration, peak_timestamp, 
     return 0.0, min(speech_duration, video_duration)
 
 # ==========================================
-# 4. SYSTEM BINARY & INGESTION PIPELINE
+# 5. INGESTION PIPELINE
 # ==========================================
-def get_ffmpeg_binary():
-    try:
-        path = imageio_ffmpeg.get_ffmpeg_exe()
-        if path and os.path.exists(path):
-            return path
-    except Exception:
-        pass
-    return "ffmpeg"
-
 def download_media_from_url(url, target_directory):
     ffmpeg_bin = get_ffmpeg_binary()
     output_path = os.path.join(target_directory, 'downloaded_source.mp4')
@@ -214,7 +229,7 @@ def download_media_from_url(url, target_directory):
     raise RuntimeError(f"Ingestion Engine Error: {str(last_err)}")
 
 # ==========================================
-# 5. SPEECH SYNTHESIS & REFRAMING ENGINE
+# 6. SPEECH SYNTHESIS & REFRAMING ENGINE
 # ==========================================
 def sanitize_script(text):
     if not text or not text.strip():
@@ -268,7 +283,7 @@ def reframe_canvas(frame_array, target_aspect="9:16 Shorts/Reels"):
     return np.array(background)
 
 # ==========================================
-# 6. DYNAMIC TIMED CAPTION RENDERER
+# 7. DYNAMIC TIMED CAPTION RENDERER
 # ==========================================
 def load_font(height, size_factor=0.045):
     font_size = max(int(height * size_factor), 18)
@@ -351,13 +366,12 @@ def render_ai_timed_captions(frame_array, current_time, word_timestamps, preset,
     return np.array(img)
 
 # ==========================================
-# 7. INTERACTIVE AI COPILOT HANDLER
+# 8. INTERACTIVE AI COPILOT HANDLER
 # ==========================================
 def process_user_chat_command(user_command):
     cmd = user_command.lower()
     changes = []
 
-    # Trim / Climax mode updates
     if any(k in cmd for k in ["full video", "dont cut", "don't cut", "keep whole", "entire"]):
         st.session_state.trim_mode = "Keep Full Video (Fit Speech)"
         changes.append("Set strategy to **Keep Full Video Duration**.")
@@ -366,7 +380,6 @@ def process_user_chat_command(user_command):
         st.session_state.trim_mode = "Smart Climax Retention"
         changes.append("Activated **Smart Climax Detection**.")
 
-    # Preset updates
     if "cyberpunk" in cmd or "neon" in cmd:
         st.session_state.caption_preset = "Cyberpunk Glow"
         changes.append("Changed caption style to **Cyberpunk Glow**.")
@@ -377,7 +390,6 @@ def process_user_chat_command(user_command):
         st.session_state.caption_preset = "Hormozi Active Highlight"
         changes.append("Changed caption style to **Hormozi Active Highlight**.")
 
-    # Script updates
     if "script:" in cmd:
         new_script = user_command.split("script:", 1)[1].strip()
         if new_script:
@@ -394,11 +406,10 @@ def process_user_chat_command(user_command):
     return "✅ " + " ".join(changes)
 
 # ==========================================
-# 8. STREAMLIT APPLICATION & UI
+# 9. STREAMLIT APPLICATION & UI
 # ==========================================
 st.set_page_config(page_title="ViewMax AI Studio - Intelligent Engine", page_icon="⚡", layout="wide")
 
-# State Initialization
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = [
         {"role": "assistant", "content": "👋 Hi! I'm your AI Video Copilot. Tell me what changes to make (e.g., 'Keep full video', 'Find KO moment', 'Change preset to Cyberpunk', or 'Script: [your text]')."}
@@ -414,7 +425,6 @@ if "script_input" not in st.session_state:
 st.title("⚡ ViewMax Studio — Intelligent Local AI Engine")
 st.caption("Local Whisper Word Timing + Audio Peak KO Detection + Zero API Key AI Chat Copilot.")
 
-# Sidebar Controls (Synced with Session State)
 st.sidebar.title("🎛 AI Pipeline Controls")
 
 trim_options = ["Smart Climax Retention", "Keep Full Video (Fit Speech)", "Standard Start Cut"]
@@ -474,7 +484,7 @@ with col2:
 st.divider()
 
 # ==========================================
-# 9. RENDERING EXECUTION ENGINE
+# 10. RENDERING EXECUTION ENGINE
 # ==========================================
 if st.button("🚀 Render Video with AI Timing & Action Detection"):
     cleaned = sanitize_script(st.session_state.script_input)
@@ -505,18 +515,28 @@ if st.button("🚀 Render Video with AI Timing & Action Detection"):
                 # 2. Peak Audio Action / KO Climax Analysis
                 status_box.info("2/7 Scanning audio waveform for action climax peak...")
                 raw_clip_initial = VideoFileClip(source_path)
-                full_video_duration = raw_clip_initial.duration
+                full_video_duration = float(raw_clip_initial.duration)
                 peak_action_t = detect_action_climax_timestamp(source_path)
                 raw_clip_initial.close()
                 progress.progress(30)
 
-                # 3. Speech Audio Synthesis
-                status_box.info("3/7 Synthesizing voiceover audio track...")
-                audio_path = os.path.join(temp_dir, "voice.mp3")
-                build_voiceover(cleaned, selected_accent, audio_path)
-                
-                ai_audio = AudioFileClip(audio_path)
-                speech_dur = ai_audio.duration
+                # 3. Speech Audio Synthesis with Tail Padding
+                status_box.info("3/7 Synthesizing voiceover audio track with zero-drop padding...")
+                raw_audio_path = os.path.join(temp_dir, "raw_voice.mp3")
+                padded_audio_path = os.path.join(temp_dir, "padded_voice.wav")
+
+                build_voiceover(cleaned, selected_accent, raw_audio_path)
+
+                temp_speech = AudioFileClip(raw_audio_path)
+                raw_speech_dur = float(temp_speech.duration)
+                temp_speech.close()
+
+                # Ensure a minimum 1.5s duration threshold
+                speech_dur = max(1.5, raw_speech_dur)
+
+                # Append 3 seconds of silent audio padding to protect against MoviePy time crashes
+                pad_audio_file_with_silence(raw_audio_path, padded_audio_path, pad_seconds=3.0)
+                ai_audio = AudioFileClip(padded_audio_path)
                 progress.progress(45)
 
                 # 4. Smart Subclip Calculation
@@ -529,15 +549,17 @@ if st.button("🚀 Render Video with AI Timing & Action Detection"):
                 trimmed_raw = safe_subclip(raw_clip, start_t, end_t)
 
                 if trimmed_raw.duration < speech_dur:
-                    loops = int(math.ceil(speech_dur / trimmed_raw.duration))
+                    loops = int(math.ceil(speech_dur / max(0.1, trimmed_raw.duration)))
                     synced_video = safe_subclip(concatenate_videoclips([trimmed_raw] * loops), 0, speech_dur)
                 else:
                     synced_video = safe_subclip(trimmed_raw, 0, speech_dur)
+
+                synced_video = safe_set_duration(synced_video, speech_dur)
                 progress.progress(60)
 
                 # 5. Local Safe Whisper Word Alignment
                 status_box.info("5/7 Local Whisper AI aligning word timestamps...")
-                word_timestamps = extract_ai_word_timestamps_safe(audio_path, model_size="base")
+                word_timestamps = extract_ai_word_timestamps_safe(raw_audio_path, model_size="base")
                 progress.progress(75)
 
                 # 6. Canvas Reframing
@@ -558,6 +580,7 @@ if st.button("🚀 Render Video with AI Timing & Action Detection"):
                 )
 
                 output_clip = safe_set_audio(final_captioned, ai_audio)
+                output_clip = safe_set_duration(output_clip, speech_dur)
                 export_path = os.path.join(temp_dir, "viewmax_intelligent.mp4")
 
                 output_clip.write_videofile(
