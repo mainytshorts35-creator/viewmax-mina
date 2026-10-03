@@ -1,2 +1,10 @@
+streamlit
+moviepy
+yt-dlp
+imageio-ffmpeg
+pillow
+gTTS
+faster-whisper
 av>=11.0.0
-faster-whisper>=1.0.0
+requests
+numpy
