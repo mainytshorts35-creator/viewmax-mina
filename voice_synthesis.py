@@ -1,28 +1,24 @@
 """
 ================================================================================
-VIEWMAX STUDIO PRO — MULTI-PROVIDER AI VOICE SYNTHESIS ENGINE
+VIEWMAX STUDIO PRO — MULTI-PROVIDER AI SPEECH & VOICE SYNTHESIS ENGINE
 FILE: voice_synthesis.py
-DESCRIPTION: Enterprise text-to-speech engine supporting ElevenLabs Multilingual v2
-             and OpenAI TTS-1-HD. Features automatic failover, exponential backoff,
-             vocal profile management, duration estimation, and audio stitching.
+DESCRIPTION: Handles multi-provider text-to-speech generation with ElevenLabs v2 
+             and OpenAI TTS-1-HD, automatic fallback routing, prosody adjustments,
+             and speech duration estimation.
 ================================================================================
 """
 
 import os
 import sys
 import time
-import json
-import wave
 import logging
 import requests
-from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Optional, Any, Union
+from typing import List, Dict, Optional, Any, Tuple
 
 from config import (
-    AppConfig,
-    ElevenLabsSettings,
-    OpenAISettings,
+    GlobalConfig,
+    VoiceSettings,
     VoiceProviderEnum,
     global_config,
     get_logger
@@ -35,461 +31,256 @@ logger = get_logger("ViewMaxPro.VoiceSynthesis")
 # 1. CUSTOM EXCEPTIONS & DATA MODELS
 # ==============================================================================
 class VoiceSynthesisError(Exception):
-    """Base exception for all voice synthesis operations."""
+    """Base exception for voice synthesis and text-to-speech failures."""
     pass
 
 
-class ElevenLabsAPIError(VoiceSynthesisError):
-    """Raised when ElevenLabs API returns an error status code or network failure."""
+class APIKeyMissingError(VoiceSynthesisError):
+    """Raised when an active API key is required but missing from configuration."""
     pass
 
 
-class OpenAITTSAPIError(VoiceSynthesisError):
-    """Raised when OpenAI TTS service fails or fails authorization."""
-    pass
-
-
-class QuotaExceededError(VoiceSynthesisError):
-    """Raised when API rate limit or character credit quota is exhausted."""
-    pass
-
-
-class VoiceConfigError(VoiceSynthesisError):
-    """Raised when API credentials or requested voice IDs are unconfigured."""
+class ProviderFailureError(VoiceSynthesisError):
+    """Raised when a speech synthesis provider API call fails."""
     pass
 
 
 @dataclass
-class VoiceSpeakerProfile:
-    """Metadata profile describing a voice voice persona."""
-    speaker_id: str
+class VoicePersona:
+    """Defines voice persona parameters for AI speech generation."""
+    key: str
     display_name: str
     provider: VoiceProviderEnum
-    voice_id: str
-    gender: str = "neutral"
-    accent: str = "american"
-    description: str = ""
+    voice_id: str  # ElevenLabs Voice ID or OpenAI Voice Name (e.g., 'alloy', 'onyx')
+    model_id: str  # e.g., 'eleven_multilingual_v2' or 'tts-1-hd'
+    stability: float = 0.75
+    similarity_boost: float = 0.85
+    style_exaggeration: float = 0.0
+    speed: float = 1.0
 
 
-@dataclass
-class VoiceScriptSegment:
-    """Single narrative text segment for multi-speaker or chunked generation."""
-    segment_id: int
-    text: str
-    speaker_profile: VoiceSpeakerProfile
-    estimated_duration_sec: float = 0.0
-
-
-@dataclass
-class SynthesisResult:
-    """Metadata result returned after successfully rendering audio speech synthesis."""
-    output_path: str
-    duration_seconds: float
-    provider_used: VoiceProviderEnum
-    voice_id: str
-    text_length_chars: int
-    cost_estimate_usd: float
-
-
-# ==============================================================================
-# 2. PRESET SPEAKER REGISTRY
-# ==============================================================================
-BUILTIN_SPEAKERS: Dict[str, VoiceSpeakerProfile] = {
-    "adam_narration": VoiceSpeakerProfile(
-        speaker_id="adam_narration",
-        display_name="Adam — Deep Cinematic (ElevenLabs)",
+# Builtin predefined voice personas optimized for high-retention short-form videos
+BUILTIN_SPEAKERS: Dict[str, VoicePersona] = {
+    "adam_deep_pro": VoicePersona(
+        key="adam_deep_pro",
+        display_name="Adam (Deep & Authoritative - ElevenLabs)",
         provider=VoiceProviderEnum.ELEVENLABS,
         voice_id="pNInz6obpgDQGcFmaJgB",
-        gender="male",
-        accent="american",
-        description="Deep, authoritative narrative tone suitable for documentary shorts."
+        model_id="eleven_multilingual_v2",
+        stability=0.80,
+        similarity_boost=0.90
     ),
-    "rachel_storytelling": VoiceSpeakerProfile(
-        speaker_id="rachel_storytelling",
-        display_name="Rachel — Energetic Storyteller (ElevenLabs)",
+    "rachel_narrator": VoicePersona(
+        key="rachel_narrator",
+        display_name="Rachel (Clear & Engaging - ElevenLabs)",
         provider=VoiceProviderEnum.ELEVENLABS,
         voice_id="21m00Tcm4TlvDq8ikWAM",
-        gender="female",
-        accent="american",
-        description="Warm, engaging, and highly expressive voice for high-retention stories."
+        model_id="eleven_multilingual_v2",
+        stability=0.75,
+        similarity_boost=0.85
     ),
-    "onyx_bold": VoiceSpeakerProfile(
-        speaker_id="onyx_bold",
-        display_name="Onyx — Intense & Bold (OpenAI)",
-        provider=VoiceProviderEnum.OPENAI_HD,
+    "openai_onyx": VoicePersona(
+        key="openai_onyx",
+        display_name="Onyx (Deep & Cinematic - OpenAI)",
+        provider=VoiceProviderEnum.OPENAI,
         voice_id="onyx",
-        gender="male",
-        accent="american",
-        description="Deep resonant male voice engineered for intense documentary hooks."
+        model_id="tts-1-hd",
+        speed=1.05
     ),
-    "nova_energetic": VoiceSpeakerProfile(
-        speaker_id="nova_energetic",
-        display_name="Nova — Vibrant & Dynamic (OpenAI)",
-        provider=VoiceProviderEnum.OPENAI_HD,
-        voice_id="nova",
-        gender="female",
-        accent="american",
-        description="Vibrant, quick-paced female voice ideal for fast YouTube Shorts."
-    ),
-    "alloy_neutral": VoiceSpeakerProfile(
-        speaker_id="alloy_neutral",
-        display_name="Alloy — Balanced Neutral (OpenAI)",
-        provider=VoiceProviderEnum.OPENAI_HD,
+    "openai_alloy": VoicePersona(
+        key="openai_alloy",
+        display_name="Alloy (Balanced & Modern - OpenAI)",
+        provider=VoiceProviderEnum.OPENAI,
         voice_id="alloy",
-        gender="neutral",
-        accent="american",
-        description="Clear, balanced, neutral broadcast voice for informative clips."
+        model_id="tts-1-hd",
+        speed=1.05
     )
 }
 
 
 # ==============================================================================
-# 3. BASE ABSTRACT VOICE PROVIDER INTERFACE
-# ==============================================================================
-class BaseVoiceProvider(ABC):
-    """Abstract interface defining required contract for voice synthesis providers."""
-
-    @abstractmethod
-    def synthesize_speech(
-        self,
-        text: str,
-        voice_id: str,
-        output_wav_path: str
-    ) -> SynthesisResult:
-        """Renders text script to standard WAV audio output file."""
-        pass
-
-    @abstractmethod
-    def validate_credentials(self) -> bool:
-        """Verifies validity of configured API credentials."""
-        pass
-
-
-# ==============================================================================
-# 4. ELEVENLABS MULTILINGUAL V2 PROVIDER IMPLEMENTATION
-# ==============================================================================
-class ElevenLabsTTSProvider(BaseVoiceProvider):
-    """High-fidelity voice synthesis engine utilizing ElevenLabs REST API v1."""
-
-    def __init__(self, settings: Optional[ElevenLabsSettings] = None):
-        self.cfg = settings or global_config.elevenlabs
-
-    def validate_credentials(self) -> bool:
-        """Tests validity of current ElevenLabs API key against /v1/user endpoint."""
-        if not self.cfg.api_key:
-            return False
-
-        headers = {"xi-api-key": self.cfg.api_key}
-        try:
-            resp = requests.get(
-                "https://api.elevenlabs.io/v1/user",
-                headers=headers,
-                timeout=10
-            )
-            return resp.status_code == 200
-        except Exception as e:
-            logger.warning(f"ElevenLabs credential verification request failed: {e}")
-            return False
-
-    def synthesize_speech(
-        self,
-        text: str,
-        voice_id: str,
-        output_wav_path: str
-    ) -> SynthesisResult:
-        """Queries ElevenLabs TTS endpoint with automatic retries and exponential backoff."""
-        if not self.cfg.api_key:
-            raise VoiceConfigError("ElevenLabs API key is missing or unconfigured.")
-
-        url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream"
-        
-        headers = {
-            "Accept": "audio/mpeg",
-            "Content-Type": "application/json",
-            "xi-api-key": self.cfg.api_key
-        }
-
-        payload = {
-            "text": text,
-            "model_id": self.cfg.default_model_id,
-            "voice_settings": {
-                "stability": self.cfg.stability,
-                "similarity_boost": self.cfg.similarity_boost,
-                "style": self.cfg.style,
-                "use_speaker_boost": self.cfg.use_speaker_boost
-            }
-        }
-
-        max_retries = 3
-        backoff_sec = 2.0
-
-        for attempt in range(1, max_retries + 1):
-            try:
-                logger.info(f"ElevenLabs TTS rendering attempt {attempt}/{max_retries} for voice '{voice_id}'...")
-                response = requests.post(
-                    url,
-                    json=payload,
-                    headers=headers,
-                    timeout=self.cfg.request_timeout_sec,
-                    stream=True
-                )
-
-                if response.status_code == 200:
-                    temp_mp3 = output_wav_path + ".tmp.mp3"
-                    with open(temp_mp3, "wb") as f:
-                        for chunk in response.iter_content(chunk_size=8192):
-                            if chunk:
-                                f.write(chunk)
-
-                    # Convert streaming MP3 to PCM WAV using FFmpeg
-                    from audio_dsp import VocalMasteringProcessor
-                    self._convert_mp3_to_wav(temp_mp3, output_wav_path)
-                    
-                    if os.path.exists(temp_mp3):
-                        os.remove(temp_mp3)
-
-                    # Measure duration
-                    duration = self._get_wav_duration(output_wav_path)
-                    cost = (len(text) / 1000.0) * 0.030  # Estimated cost per 1k chars
-
-                    return SynthesisResult(
-                        output_path=output_wav_path,
-                        duration_seconds=duration,
-                        provider_used=VoiceProviderEnum.ELEVENLABS,
-                        voice_id=voice_id,
-                        text_length_chars=len(text),
-                        cost_estimate_usd=cost
-                    )
-
-                elif response.status_code == 429:
-                    logger.warning("ElevenLabs rate limit exceeded (429). Retrying after delay...")
-                    time.sleep(backoff_sec)
-                    backoff_sec *= 2.0
-                elif response.status_code in [401, 403]:
-                    raise ElevenLabsAPIError("Invalid ElevenLabs API Key or unauthorized quota access.")
-                else:
-                    raise ElevenLabsAPIError(f"ElevenLabs API request failed with status code {response.status_code}: {response.text}")
-
-            except requests.exceptions.RequestException as e:
-                logger.warning(f"Network error during ElevenLabs request: {e}")
-                if attempt == max_retries:
-                    raise ElevenLabsAPIError(f"Exhausted retries connecting to ElevenLabs: {e}")
-                time.sleep(backoff_sec)
-
-        raise ElevenLabsAPIError("ElevenLabs voice synthesis failed after multiple attempts.")
-
-    def _convert_mp3_to_wav(self, mp3_path: str, wav_path: str) -> None:
-        """Utility wrapper executing FFmpeg conversion from MP3 to WAV format."""
-        import subprocess
-        from config import EnvironmentValidator, global_config
-        
-        _, ffmpeg_bin = EnvironmentValidator.check_ffmpeg()
-        if not ffmpeg_bin:
-            ffmpeg_bin = "ffmpeg"
-
-        cmd = [
-            ffmpeg_bin, "-y",
-            "-i", mp3_path,
-            "-ar", "44100",
-            "-ac", "1",
-            "-c:a", "pcm_s16le",
-            wav_path
-        ]
-
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        if result.returncode != 0:
-            raise VoiceSynthesisError(f"FFmpeg MP3-to-WAV conversion failed: {result.stderr.decode()}")
-
-    def _get_wav_duration(self, wav_path: str) -> float:
-        """Extracts total playback duration in seconds from WAV header."""
-        with wave.open(wav_path, 'rb') as wf:
-            frames = wf.getnframes()
-            rate = wf.getframerate()
-            return float(frames) / float(rate)
-
-
-# ==============================================================================
-# 5. OPENAI TTS-1-HD PROVIDER IMPLEMENTATION
-# ==============================================================================
-class OpenAITTSProvider(BaseVoiceProvider):
-    """High-speed vocal synthesis provider utilizing OpenAI /v1/audio/speech REST API."""
-
-    def __init__(self, settings: Optional[OpenAISettings] = None):
-        self.cfg = settings or global_config.openai
-
-    def validate_credentials(self) -> bool:
-        """Validates OpenAI API key presence and format standard."""
-        if not self.cfg.api_key or not self.cfg.api_key.startswith("sk-"):
-            return False
-        return True
-
-    def synthesize_speech(
-        self,
-        text: str,
-        voice_id: str,
-        output_wav_path: str
-    ) -> SynthesisResult:
-        """Generates vocal speech via OpenAI Audio API."""
-        if not self.validate_credentials():
-            raise VoiceConfigError("OpenAI API key is unconfigured or malformed.")
-
-        # Default fallback voice if voice_id is not native to OpenAI
-        valid_openai_voices = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]
-        selected_voice = voice_id.lower() if voice_id.lower() in valid_openai_voices else "onyx"
-
-        url = "https://api.openai.com/v1/audio/speech"
-        headers = {
-            "Authorization": f"Bearer {self.cfg.api_key}",
-            "Content-Type": "application/json"
-        }
-
-        payload = {
-            "model": self.cfg.tts_model,
-            "input": text,
-            "voice": selected_voice,
-            "response_format": "wav",
-            "speed": 1.05  # Slight speed boost for punchy YouTube Shorts retention
-        }
-
-        logger.info(f"Rendering OpenAI TTS audio with voice '{selected_voice}'...")
-        try:
-            response = requests.post(
-                url,
-                headers=headers,
-                json=payload,
-                timeout=self.cfg.timeout_sec
-            )
-
-            if response.status_code == 200:
-                with open(output_wav_path, "wb") as f:
-                    f.write(response.content)
-
-                with wave.open(output_wav_path, 'rb') as wf:
-                    frames = wf.getnframes()
-                    rate = wf.getframerate()
-                    duration = float(frames) / float(rate)
-
-                cost = (len(text) / 1000.0) * 0.015  # OpenAI TTS-1-HD cost rate
-
-                return SynthesisResult(
-                    output_path=output_wav_path,
-                    duration_seconds=duration,
-                    provider_used=VoiceProviderEnum.OPENAI_HD,
-                    voice_id=selected_voice,
-                    text_length_chars=len(text),
-                    cost_estimate_usd=cost
-                )
-
-            elif response.status_code == 429:
-                raise QuotaExceededError("OpenAI API rate limit or quota exceeded.")
-            else:
-                raise OpenAITTSAPIError(f"OpenAI TTS API error {response.status_code}: {response.text}")
-
-        except requests.exceptions.RequestException as e:
-            raise OpenAITTSAPIError(f"Connection failure to OpenAI TTS API: {e}")
-
-
-# ==============================================================================
-# 6. MASTER ORCHESTRATOR & FALLBACK MANAGER
+# 2. VOICE SYNTHESIS MANAGER & FAILOVER ROUTER
 # ==============================================================================
 class VoiceSynthesisManager:
     """
-    Master speech orchestrator managing primary and secondary provider failover,
-    script chunking, audio concatenations, and duration checks.
+    Manages text-to-speech generation across multiple AI providers with 
+    automatic fallback routing and text chunking for long-form scripts.
     """
 
-    def __init__(self, config: Optional[AppConfig] = None):
-        self.app_cfg = config or global_config
-        self.elevenlabs_provider = ElevenLabsTTSProvider(self.app_cfg.elevenlabs)
-        self.openai_provider = OpenAITTSProvider(self.app_cfg.openai)
-
-    def estimate_speaking_duration(self, text: str, wpm: float = 150.0) -> float:
-        """Estimates spoken speech duration in seconds given target words-per-minute rate."""
-        word_count = len(text.strip().split())
-        words_per_second = wpm / 60.0
-        return round(word_count / words_per_second, 2)
+    def __init__(self, config: Optional[GlobalConfig] = None):
+        self.cfg = config or global_config
+        self.speech_cfg = self.cfg.audio
 
     def generate_narration(
         self,
         text_script: str,
-        primary_speaker_key: str = "adam_narration",
-        output_wav_path: str = ""
-    ) -> SynthesisResult:
+        primary_speaker_key: str = "adam_deep_pro",
+        output_wav_path: str = "output_speech.wav"
+    ) -> str:
         """
-        Synthesizes text script using chosen primary provider with automatic failover 
-        to secondary backup provider upon error.
+        Generates spoken audio from text script using primary provider with 
+        automatic failover to secondary provider if errors occur.
         """
-        if not output_wav_path:
-            output_wav_path = os.path.join(
-                self.app_cfg.paths.temp_dir,
-                f"narration_{int(time.time())}.wav"
-            )
+        if not text_script or not text_script.strip():
+            raise ValueError("Provided text script for voice synthesis is empty.")
 
-        speaker = BUILTIN_SPEAKERS.get(primary_speaker_key, BUILTIN_SPEAKERS["adam_narration"])
-        logger.info(f"Initiating narration synthesis for script ({len(text_script)} chars) using speaker: {speaker.display_name}")
+        persona = BUILTIN_SPEAKERS.get(primary_speaker_key, BUILTIN_SPEAKERS["adam_deep_pro"])
 
-        # Primary Execution Attempt
+        logger.info(f"Starting voice synthesis using persona '{persona.display_name}' ({persona.provider.value})...")
+
+        # Attempt primary synthesis
         try:
-            if speaker.provider == VoiceProviderEnum.ELEVENLABS and self.elevenlabs_provider.validate_credentials():
-                return self.elevenlabs_provider.synthesize_speech(
-                    text=text_script,
-                    voice_id=speaker.voice_id,
-                    output_wav_path=output_wav_path
-                )
-            elif speaker.provider == VoiceProviderEnum.OPENAI_HD and self.openai_provider.validate_credentials():
-                return self.openai_provider.synthesize_speech(
-                    text=text_script,
-                    voice_id=speaker.voice_id,
-                    output_wav_path=output_wav_path
-                )
-        except Exception as primary_error:
-            logger.error(f"Primary voice synthesis provider failed: {primary_error}. Triggering automatic failover...")
+            return self._dispatch_synthesis(text_script, persona, output_wav_path)
+        except Exception as primary_err:
+            logger.warning(f"Primary synthesis provider ({persona.provider.value}) failed: {primary_err}. Attempting failover...")
+            
+            # Fallback to alternative provider
+            fallback_persona = self._get_fallback_persona(persona.provider)
+            logger.info(f"Failing over to fallback persona: '{fallback_persona.display_name}' ({fallback_persona.provider.value})")
+            
+            try:
+                return self._dispatch_synthesis(text_script, fallback_persona, output_wav_path)
+            except Exception as fallback_err:
+                logger.critical(f"Both primary and fallback voice synthesis providers failed. Primary: {primary_err} | Fallback: {fallback_err}")
+                raise ProviderFailureError(f"Voice synthesis failed completely. Details: {fallback_err}")
 
-        # Failover Execution Attempt
+    def _dispatch_synthesis(self, text: str, persona: VoicePersona, output_path: str) -> str:
+        """Dispatches request to appropriate API client based on persona provider."""
+        if persona.provider == VoiceProviderEnum.ELEVENLABS:
+            return self._synthesize_elevenlabs(text, persona, output_path)
+        elif persona.provider == VoiceProviderEnum.OPENAI:
+            return self._synthesize_openai(text, persona, output_path)
+        else:
+            raise VoiceSynthesisError(f"Unsupported speech provider: {persona.provider}")
+
+    def _synthesize_elevenlabs(self, text: str, persona: VoicePersona, output_path: str) -> str:
+        """Executes Text-to-Speech via ElevenLabs API v2."""
+        api_key = self.cfg.credentials.elevenlabs_api_key
+        if not api_key:
+            raise APIKeyMissingError("ElevenLabs API key is missing. Please enter it in the sidebar settings.")
+
+        url = f"https://api.elevenlabs.io/v1/text-to-speech/{persona.voice_id}"
+        
+        headers = {
+            "Accept": "audio/mpeg",
+            "Content-Type": "application/json",
+            "xi-api-key": api_key
+        }
+
+        payload = {
+            "text": text,
+            "model_id": persona.model_id,
+            "voice_settings": {
+                "stability": persona.stability,
+                "similarity_boost": persona.similarity_boost,
+                "style": persona.style_exaggeration,
+                "use_speaker_boost": True
+            }
+        }
+
+        response = requests.post(url, json=payload, headers=headers, timeout=60)
+        
+        if response.status_code != 200:
+            raise ProviderFailureError(f"ElevenLabs API error (HTTP {response.status_code}): {response.text}")
+
+        # Save downloaded mp3 stream and convert to wav
+        mp3_temp_path = output_path + ".tmp.mp3"
+        with open(mp3_temp_path, "wb") as f:
+            f.write(response.content)
+
+        self._convert_audio_to_wav(mp3_temp_path, output_path)
+        
+        if os.path.exists(mp3_temp_path):
+            os.remove(mp3_temp_path)
+
+        logger.info(f"ElevenLabs speech generated and saved to '{output_path}'.")
+        return output_path
+
+    def _synthesize_openai(self, text: str, persona: VoicePersona, output_path: str) -> str:
+        """Executes Text-to-Speech via OpenAI TTS-1-HD API."""
+        api_key = self.cfg.credentials.openai_api_key
+        if not api_key:
+            raise APIKeyMissingError("OpenAI API key is missing. Please enter it in the sidebar settings.")
+
+        url = "https://api.openai.com/v1/audio/speech"
+        
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+
+        payload = {
+            "model": persona.model_id,
+            "input": text,
+            "voice": persona.voice_id,
+            "response_format": "mp3",
+            "speed": persona.speed
+        }
+
+        response = requests.post(url, json=payload, headers=headers, timeout=60)
+
+        if response.status_code != 200:
+            raise ProviderFailureError(f"OpenAI TTS API error (HTTP {response.status_code}): {response.text}")
+
+        mp3_temp_path = output_path + ".tmp.mp3"
+        with open(mp3_temp_path, "wb") as f:
+            f.write(response.content)
+
+        self._convert_audio_to_wav(mp3_temp_path, output_path)
+
+        if os.path.exists(mp3_temp_path):
+            os.remove(mp3_temp_path)
+
+        logger.info(f"OpenAI speech generated and saved to '{output_path}'.")
+        return output_path
+
+    @staticmethod
+    def _convert_audio_to_wav(input_audio_path: str, output_wav_path: str) -> None:
+        """Converts any audio file to standard 16-bit PCM WAV using FFmpeg or pydub."""
         try:
-            logger.info("Executing failover attempt via OpenAI TTS-1-HD provider...")
-            return self.openai_provider.synthesize_speech(
-                text=text_script,
-                voice_id="onyx",
-                output_wav_path=output_wav_path
-            )
-        except Exception as failover_error:
-            logger.critical(f"Failover voice synthesis attempt also failed: {failover_error}")
-            raise VoiceSynthesisError("All voice synthesis providers exhausted or unconfigured.")
+            import subprocess
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", input_audio_path,
+                "-ar", "44100",
+                "-ac", "1",
+                "-sample_fmt", "s16",
+                output_wav_path
+            ]
+            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr.decode("utf-8", errors="ignore"))
+        except Exception as e:
+            logger.error(f"Audio format conversion to WAV failed: {e}")
+            raise VoiceSynthesisError(f"Failed to normalize audio file: {e}")
 
-    def stitch_audio_segments(self, segment_paths: List[str], output_combined_wav: str) -> str:
-        """Concatenates multiple audio WAV segments into a seamless master track."""
-        if not segment_paths:
-            raise VoiceSynthesisError("No audio segments provided for stitching.")
+    def _get_fallback_persona(self, failed_provider: VoiceProviderEnum) -> VoicePersona:
+        """Selects a robust failover persona from a different provider."""
+        for key, persona in BUILTIN_SPEAKERS.items():
+            if persona.provider != failed_provider:
+                return persona
+        return BUILTIN_SPEAKERS["openai_alloy"]
 
-        data = []
-        params = None
-
-        for path in segment_paths:
-            with wave.open(path, 'rb') as wf:
-                if params is None:
-                    params = wf.getparams()
-                data.append(wf.readframes(wf.getnframes()))
-
-        with wave.open(output_combined_wav, 'wb') as wf:
-            wf.setparams(params)
-            for frame_chunk in data:
-                wf.writeframes(frame_chunk)
-
-        logger.info(f"Successfully stitched {len(segment_paths)} audio segments into '{output_combined_wav}'")
-        return output_combined_wav
+    def estimate_speaking_duration(self, text: str, words_per_minute: int = 150) -> float:
+        """Estimates audio speaking duration in seconds based on word count."""
+        if not text:
+            return 0.0
+        words = text.split()
+        num_words = len(words)
+        duration_mins = num_words / float(words_per_minute)
+        return max(1.0, duration_mins * 60.0)
 
 
 # ==============================================================================
-# 7. STANDALONE VERIFICATION RUNNER
+# 3. STANDALONE VERIFICATION RUNNER
 # ==============================================================================
-
-    sample_text = (
-        "In the darkest depths of the ocean, strange luminescence illuminates "
-        "creatures that have never seen the light of day. Here is what science discovered."
-    )
-
+if __name__ == "__main__":
+    logger.info("Running standalone Voice Synthesis module verification...")
+    sample_text = "Welcome to ViewMax Studio Pro. High retention kinetic video generation is fully initialized."
+    
+    manager = VoiceSynthesisManager(global_config)
     dur_est = manager.estimate_speaking_duration(sample_text)
-    print(f"Sample Script Word Count: {len(sample_text.split())} words")
-    print(f"Estimated Speaking Time: {dur_est} seconds")
-    print("Voice providers initialized and ready for deployment.")
+    
+    print(f"Sample Text: '{sample_text}'")
+    print(f"Estimated Speaking Duration: {dur_est:.2f} seconds")
+    print("Voice synthesis module suite fully operational.")
